@@ -1,0 +1,77 @@
+{
+  "config": {
+    "step": {
+      "heating_system": {
+        "title": "Heating System",
+        "description": "Select the entities for your heating system. Only Climate and Outdoor Temperature are required — all others are optional.",
+        "data": {
+          "climate_entity": "Climate Entity",
+          "outdoor_temp_sensor": "Outdoor Temperature Sensor",
+          "indoor_temp_sensor": "Indoor Temperature Sensor (optional override)",
+          "heat_curve_number": "Heat Curve Number (optional)",
+          "hot_water_setpoint_number": "Hot Water Setpoint Number (optional)",
+          "hot_water_extra_switch": "Hot Water Extra Switch (optional)",
+          "hot_water_temp_sensor": "Hot Water Temperature Sensor (optional)",
+          "pump_activity_sensor": "Pump Activity Sensor (optional)"
+        }
+      },
+      "power": {
+        "title": "Power Monitoring",
+        "description": "Optional: bind compressor and auxiliary heater power sensors for richer optimization decisions.",
+        "data": {
+          "compressor_power_sensor": "Compressor Power Sensor",
+          "aux_power_sensor": "Auxiliary/Addition Heater Power Sensor"
+        }
+      },
+      "pricing": {
+        "title": "Electricity Pricing",
+        "description": "Bind your Nord Pool (or equivalent) price sensors. The 'Today' sensor is used to read the full 96-quarter price list.",
+        "data": {
+          "price_sensor": "Current Price Sensor (öre/kWh)",
+          "price_today_sensor": "Today's Price Sensor (with 'prices' attribute, optional)"
+        }
+      },
+      "weather": {
+        "title": "Weather Forecast",
+        "description": "Optional: a daily weather forecast entity (SMHI or equivalent) enables weather-anticipation reduction.",
+        "data": {
+          "weather_forecast_entity": "Weather Forecast Entity"
+        }
+      },
+      "solar": {
+        "title": "Solar / PV",
+        "description": "Optional: bind PV and battery entities to enable solar-aware optimization.",
+        "data": {
+          "pv_excess_binary_sensor": "PV Excess Binary Sensor",
+          "solar_forecast_today_sensor": "Solar Forecast Today (kWh)",
+          "battery_discharging_binary_sensor": "Battery Discharging Binary Sensor",
+          "bridge_to_solar_binary_sensor": "Bridge-to-Solar Binary Sensor",
+          "is_sunny_day_binary_sensor": "Is Sunny Day Binary Sensor"
+        }
+      },
+      "defaults": {
+        "title": "Default Values",
+        "description": "These defaults seed the integration's own number entities. You can change them anytime from the entity UI.",
+        "data": {
+          "default_indoor_temp": "Default Indoor Temperature (°C)",
+          "default_heat_curve": "Default Heat Curve",
+          "default_hw_temp": "Default Hot Water Temperature (°C)",
+          "price_threshold": "Price Threshold (öre/kWh) — above this price 'cheap' never triggers",
+          "legionella_min_days": "Legionella Minimum Interval (days)",
+          "legionella_max_days": "Legionella Maximum Interval (days)",
+          "legionella_duration_hours": "Legionella Boost Duration (hours)"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "heating_system": { "title": "Heating System", "data": {} },
+      "power": { "title": "Power Monitoring", "data": {} },
+      "pricing": { "title": "Electricity Pricing", "data": {} },
+      "weather": { "title": "Weather Forecast", "data": {} },
+      "solar": { "title": "Solar / PV", "data": {} },
+      "defaults": { "title": "Default Values", "data": {} }
+    }
+  }
+}
