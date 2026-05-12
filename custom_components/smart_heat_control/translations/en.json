@@ -1,0 +1,138 @@
+{
+  "config": {
+    "step": {
+      "heating_system": {
+        "title": "Heating System",
+        "description": "Select the entities for your heating system. Only Climate and Outdoor Temperature are required — all others are optional.",
+        "data": {
+          "climate_entity": "Climate Entity",
+          "outdoor_temp_sensor": "Outdoor Temperature Sensor",
+          "indoor_temp_sensor": "Indoor Temperature Sensor (optional override)",
+          "heat_curve_number": "Heat Curve Number (optional)",
+          "hot_water_setpoint_number": "Hot Water Setpoint Number (optional)",
+          "hot_water_extra_switch": "Hot Water Extra Switch (optional)",
+          "hot_water_temp_sensor": "Hot Water Temperature Sensor (optional)",
+          "pump_activity_sensor": "Pump Activity Sensor (optional)"
+        }
+      },
+      "power": {
+        "title": "Power Monitoring",
+        "description": "Optional: bind power sensors for the heat pump compressor and the electric backup heater (elpatron/tillsatsvärmare). Used to detect when the backup heater is idle before entering Cheap Price mode.",
+        "data": {
+          "compressor_power_sensor": "Heat Pump Compressor Power (W) – optional",
+          "aux_power_sensor": "Electric Backup Heater (Elpatron) Power (W) – optional"
+        }
+      },
+      "pricing": {
+        "title": "Electricity Pricing",
+        "description": "Bind your spot-price sensor (Nord Pool, Tibber, ENTSO-e or template). The optional 'today' sensor enables 96-quarter price analysis — pick the sensor that has a 'prices' attribute with a list of 96 values.",
+        "data": {
+          "price_sensor": "Current Spot Price (öre/kWh) – e.g. Nord Pool SE3 Price",
+          "price_today_sensor": "Today's Price List with 'prices' attribute (96 quarters) – optional"
+        }
+      },
+      "weather": {
+        "title": "Weather Forecast",
+        "description": "Optional: a daily weather forecast entity (SMHI or equivalent) enables weather-anticipation reduction.",
+        "data": {
+          "weather_forecast_entity": "Weather Forecast Entity"
+        }
+      },
+      "solar": {
+        "title": "Solar / PV",
+        "description": "Optional: bind PV and battery entities to enable solar-aware optimization.",
+        "data": {
+          "pv_excess_binary_sensor": "PV Excess Binary Sensor",
+          "solar_forecast_today_sensor": "Solar Forecast Today (kWh)",
+          "battery_discharging_binary_sensor": "Battery Discharging Binary Sensor",
+          "bridge_to_solar_binary_sensor": "Bridge-to-Solar Binary Sensor",
+          "is_sunny_day_binary_sensor": "Is Sunny Day Binary Sensor"
+        }
+      },
+      "defaults": {
+        "title": "Default Values",
+        "description": "These defaults seed the integration's own number entities. You can change them anytime from the entity UI.",
+        "data": {
+          "default_indoor_temp": "Default Indoor Temperature (°C)",
+          "default_heat_curve": "Default Heat Curve",
+          "default_hw_temp": "Default Hot Water Temperature (°C)",
+          "price_threshold": "Price Threshold (öre/kWh) — above this price 'cheap' never triggers",
+          "legionella_min_days": "Legionella Minimum Interval (days)",
+          "legionella_max_days": "Legionella Maximum Interval (days)",
+          "legionella_duration_hours": "Legionella Boost Duration (hours)"
+        }
+      }
+    },
+    "error": {
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "Smart Heat Control is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "heating_system": {
+        "title": "Heating System",
+        "description": "Re-bind your heating system entities.",
+        "data": {
+          "climate_entity": "Climate Entity",
+          "outdoor_temp_sensor": "Outdoor Temperature Sensor",
+          "indoor_temp_sensor": "Indoor Temperature Sensor (optional override)",
+          "heat_curve_number": "Heat Curve Number (optional)",
+          "hot_water_setpoint_number": "Hot Water Setpoint Number (optional)",
+          "hot_water_extra_switch": "Hot Water Extra Switch (optional)",
+          "hot_water_temp_sensor": "Hot Water Temperature Sensor (optional)",
+          "pump_activity_sensor": "Pump Activity Sensor (optional)"
+        }
+      },
+      "power": {
+        "title": "Power Monitoring",
+        "description": "Optional power sensors for compressor and electric backup heater.",
+        "data": {
+          "compressor_power_sensor": "Heat Pump Compressor Power (W) – optional",
+          "aux_power_sensor": "Electric Backup Heater (Elpatron) Power (W) – optional"
+        }
+      },
+      "pricing": {
+        "title": "Electricity Pricing",
+        "description": "Spot-price sensor and optional 96-quarter price list sensor.",
+        "data": {
+          "price_sensor": "Current Spot Price (öre/kWh)",
+          "price_today_sensor": "Today's Price List with 'prices' attribute (96 quarters) – optional"
+        }
+      },
+      "weather": {
+        "title": "Weather Forecast",
+        "description": "Optional weather forecast entity for weather-anticipation reduction.",
+        "data": {
+          "weather_forecast_entity": "Weather Forecast Entity"
+        }
+      },
+      "solar": {
+        "title": "Solar / PV",
+        "description": "Optional PV and battery entities.",
+        "data": {
+          "pv_excess_binary_sensor": "PV Excess Binary Sensor",
+          "solar_forecast_today_sensor": "Solar Forecast Today (kWh)",
+          "battery_discharging_binary_sensor": "Battery Discharging Binary Sensor",
+          "bridge_to_solar_binary_sensor": "Bridge-to-Solar Binary Sensor",
+          "is_sunny_day_binary_sensor": "Is Sunny Day Binary Sensor"
+        }
+      },
+      "defaults": {
+        "title": "Default Values",
+        "description": "Adjust the integration's default operating values.",
+        "data": {
+          "default_indoor_temp": "Default Indoor Temperature (°C)",
+          "default_heat_curve": "Default Heat Curve",
+          "default_hw_temp": "Default Hot Water Temperature (°C)",
+          "price_threshold": "Price Threshold (öre/kWh) — above this price 'cheap' never triggers",
+          "legionella_min_days": "Legionella Minimum Interval (days)",
+          "legionella_max_days": "Legionella Maximum Interval (days)",
+          "legionella_duration_hours": "Legionella Boost Duration (hours)"
+        }
+      }
+    }
+  }
+}
