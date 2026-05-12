@@ -88,8 +88,10 @@ def _power_sensor() -> selector.EntitySelector:
     return _entity("sensor", device_class="power")
 
 
-def _monetary_sensor() -> selector.EntitySelector:
-    return _entity("sensor", device_class="monetary")
+def _price_sensor() -> selector.EntitySelector:
+    # Do NOT filter by device_class — Nord Pool, Tibber and template sensors
+    # rarely set device_class=monetary; a plain sensor selector works for all.
+    return _entity("sensor")
 
 
 def _number_box(
@@ -169,14 +171,14 @@ def _power_schema(defaults: dict[str, Any]) -> vol.Schema:
 def _pricing_schema(defaults: dict[str, Any]) -> vol.Schema:
     return vol.Schema(
         {
-            vol.Required(
+            vol.Optional(
                 CONF_PRICE_SENSOR,
                 default=defaults.get(CONF_PRICE_SENSOR, vol.UNDEFINED),
-            ): _monetary_sensor(),
+            ): _price_sensor(),
             vol.Optional(
                 CONF_PRICE_TODAY_SENSOR,
                 default=defaults.get(CONF_PRICE_TODAY_SENSOR, vol.UNDEFINED),
-            ): _entity("sensor"),
+            ): _price_sensor(),
         }
     )
 
