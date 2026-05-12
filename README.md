@@ -1,9 +1,31 @@
 # Smart Heat Control
 
-**Pris- och väderstyrd optimering för värmepumpar, fjärrvärme och varmvattenberedare via Home Assistant.**
+**Pris- och väderstyrd optimering för värmepumpar, fjärrvärme och varmvattenberedare via Home Assistant.**  
 *(English summary below.)*
 
-> ⚠️ **Status: pre-alpha (v0.1.0)** — Strukturen är på plats men logiken porteras fortfarande från en beprövad 2-årig YAML-automation. Använd inte i produktion än.
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
+[![GitHub release](https://img.shields.io/github/v/release/tengmo-ab/smart-heat-control?include_prereleases)](https://github.com/tengmo-ab/smart-heat-control/releases)
+[![License](https://img.shields.io/github/license/tengmo-ab/smart-heat-control)](LICENSE)
+
+---
+
+## Installation via HACS (rekommenderat)
+
+Klicka på knappen nedan — den öppnar HACS i din Home Assistant-instans och lägger till repot med ett klick:
+
+[![Öppna i HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=tengmo-ab&repository=smart-heat-control&category=integration)
+
+> **Kräver att HACS är installerat.** Om du inte har HACS: [hacs.xyz/docs/use/download/download](https://hacs.xyz/docs/use/download/download)
+
+Efter att repot lagts till i HACS:
+1. HACS → Integrations → sök *Smart Heat Control* → Download
+2. Starta om Home Assistant
+3. Settings → Integrations → Add Integration → *Smart Heat Control*
+4. Följ 6-stegs config-flowet och peka ut dina entiteter
+
+### Manuell installation
+
+Kopiera mappen `custom_components/smart_heat_control/` till din HA:s `config/custom_components/` och starta om.
 
 ---
 
@@ -17,7 +39,7 @@ Logiken kommer från en YAML-automation som körts dagligen i 2 år på en Comfo
 
 1. **Allt är valfritt utom själva värmesystemet och utomhustemp.** Saknar du väderprognos? Logiken faller tillbaka på prisstyrning. Saknar du Nord Pool? Logiken kör väder-anteciperad reduktion. Saknar du både och? Integrationen sätter dina default-värden och avstår från optimering — komforten är säker, du förlorar bara besparingen.
 2. **Tillfälligt trasiga sensorer ska inte krascha optimering.** Varje upstream-läsning som rapporterar `unavailable`/`unknown` eller är utanför rimligt intervall behandlas som `None`, och den specifika gren som behöver värdet inaktiveras tills nästa cykel. Andra grenar fortsätter köra.
-3. **Den 2-åriga ordningsföljden är lag.** v2 är en 1:1-portering av kaskaden — inga "förbättringar" smygs in utan explicit godkännande. Buggar som hittas i v1 (t.ex. `hw_mode` sträng-vs-float-jämförelsen) fixas i v2 men dokumenteras separat.
+3. **Den 2-åriga ordningsföljden är lag.** v2 är en 1:1-portering av kaskaden — inga "förbättringar" smygs in utan explicit godkännande.
 4. **Stabila strängar för stats.** Modes (`Default`, `Cheap Price Intensify`, `Price Peak Reduction`, `Weather Anticipation Reduction`, `Mid-day Boost`, `Night Boost`, `Legionella Boost`, `Heating Priority`) byts inte utan migrationsplan eftersom de hamnar i HA:s state-historik.
 
 ## Arkitektur
@@ -28,19 +50,17 @@ custom_components/smart_heat_control/
 ├── const.py               ✅ DOMAIN, CONF_*, defaults, mode-strängar, tröskelvärden
 ├── config_flow.py         ✅ 6-stegs config-flow (heating → power → pricing → weather → solar → defaults)
 ├── models.py              ✅ Inputs / Computed / Decision / Health-dataclasser
-├── coordinator.py         ⏳ DataUpdateCoordinator (skelett)
+├── computed.py            ✅ Beräkningslager (1:1-port av v1 variables:-block)
+├── controller.py          ✅ Beslutskaskad (Weather → Price Peak → Cheap → Default + VV + legionella)
+├── coordinator.py         ✅ DataUpdateCoordinator, _read_inputs, _apply, HW-reduktion SM
 ├── __init__.py            ✅ async_setup_entry / unload
-├── computed.py            ⏳ Beräkningar porteras från v1 variables:-block
-├── controller.py          ⏳ Beslutskaskaden porteras från v1 choose:-grenar
-├── select.py              ⏳ current_optimization_mode, hw_mode (read-only)
-├── switch.py              ⏳ master_enabled, *_enabled-flaggor
-├── number.py              ⏳ default_*, threshold, legionella-tröskelvärden
-├── datetime.py            ⏳ vacation_end, last_legionella_run
-├── binary_sensor.py       ⏳ hw_reduction_active, current_hour_is_cheap m.fl.
-├── sensor.py              ⏳ Ported template-sensorer (cheap_hours_list, AM/PM-snitt osv.)
-├── button.py              ⏳ reset_to_defaults, trigger_legionella_now
-├── strings.json           ⏳
-└── translations/{en,sv}.json
+├── switch.py              ✅ master_enabled, cheap_price, price_peak, weather, legionella, solar
+├── number.py              ✅ default_indoor_temp, heat_curve, hw_temp, price_threshold, legionella
+├── select.py              ✅ optimization_mode, hw_mode (read-only outputs)
+├── sensor.py              ✅ AM/PM-snittpriser, future_highest_temp, days_since_legionella, m.fl.
+├── binary_sensor.py       ✅ hw_reduction_active, is_evening_expensive, wait_for_sun
+├── datetime.py            ✅ vacation_end, last_legionella_run
+└── strings.json           ✅ Config-flow UI-labels
 ```
 
 ## Roller (vad du pekar ut i config-flowet)
@@ -58,7 +78,7 @@ custom_components/smart_heat_control/
 | Power | `compressor_power_sensor` | Valfri | "Full kompressor"-detektering avstängd |
 | Power | `aux_power_sensor` | Valfri | Tillsatsskydd avstängt — kan ge mer aux-drift |
 | Pricing | `price_sensor` | **Krav för prisopt.** | Hela pris-grenen avstängd, väder-only |
-| Pricing | `price_today_sensor` | Valfri | Dagsmedel härleds från `today`-attributet |
+| Pricing | `price_today_sensor` | Valfri | Ingen kvartalsprisanalys (96-values) |
 | Weather | `weather_forecast_entity` | Valfri | Månadsbaserad winter-fallback, väder-anticipation av |
 | Solar/PV | `pv_excess_binary_sensor` | Valfri | Inga PV-överskotts-justeringar |
 | Solar/PV | `solar_forecast_today_sensor` | Valfri | "Survive solar"-läget avstängt |
@@ -80,14 +100,16 @@ Integrationen rapporterar nedgraderingen via `select.smart_heat_control_optimiza
 
 ## Roadmap
 
-- [x] Skelett: manifest, const, config_flow, __init__, coordinator, models
-- [ ] Computed-sensorer (porterar v1 `variables:`-block)
-- [ ] Controller (porterar v1 kaskad)
-- [ ] Entity-plattformar (sensor/switch/number/select/datetime/binary_sensor/button)
-- [ ] Översättningar (en, sv)
+- [x] Skelett: manifest, const, config_flow, `__init__`, coordinator, models
+- [x] Computed-lager (1:1-port av v1 `variables:`-block, kvartalsprisanalys)
+- [x] Controller (1:1-port av v1 kaskad — Weather → Price Peak → Cheap → Default + VV + legionella)
+- [x] Entity-plattformar (switch, number, select, sensor, binary_sensor, datetime)
+- [x] Coordinator med rolling buffers, HW-reduktion state machine, write-only-if-changed
 - [ ] Testsvit (`tests/test_controller.py` med scenario per gren)
-- [ ] Diagnostik (redacted dump)
-- [ ] Stats-migrationsguide för existerande v1-användare
+- [ ] Översättningar (`translations/en.json`, `translations/sv.json`)
+- [ ] Diagnostik (redacted dump för felsökning)
+- [ ] Stats-migrationsguide för existerande v1-användare (comfortzone_settings_controller)
+- [ ] HACS-listning (default store)
 
 ## Licens
 
@@ -97,10 +119,30 @@ Integrationen rapporterar nedgraderingen via `select.smart_heat_control_optimiza
 
 # 🇬🇧 English summary
 
-Smart Heat Control is a Home Assistant integration that adds price- and weather-aware optimization on top of any heat pump, district heating system, or hot water boiler. It reads your spot price (Nord Pool / Tibber / ENTSO-e), weather forecast, PV surplus, and compressor/aux power, and writes back to a climate entity + heating-curve number + hot-water-setpoint number to shift consumption to cheap hours without losing comfort.
+Smart Heat Control is a Home Assistant integration that adds price- and weather-aware optimization on top of any heat pump, district heating system, or hot water boiler.
+
+## One-click install via HACS
+
+[![Open in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=tengmo-ab&repository=smart-heat-control&category=integration)
+
+Requires [HACS](https://hacs.xyz) to be installed. After adding the repository: HACS → Integrations → Search "Smart Heat Control" → Download → Restart HA → Settings → Integrations → Add → Smart Heat Control.
+
+## What it does
+
+Reads your spot price (Nord Pool / Tibber / ENTSO-e), weather forecast, PV surplus, and compressor/aux power, and writes back to a `climate.*` entity + heating-curve `number.*` + hot-water-setpoint `number.*` to shift consumption to cheap hours without losing comfort.
 
 The logic is a 1:1 port of a 2-year-proven YAML automation originally written for a Comfortzone RX95 exhaust-air heat pump, abstracted in v2 to work with any vendor through entity-role bindings in the config flow.
 
-**Core idea:** every upstream entity except the climate entity and outdoor temp is optional. Missing weather forecast? Price-only optimization. Missing price? Weather-only. Missing both? Safe defaults — comfort preserved, savings forfeited.
+**Core idea:** every upstream entity except the climate entity and outdoor temperature is optional. Missing weather forecast? Price-only optimization. Missing price? Weather-only. Missing both? Safe defaults — comfort preserved, savings forfeited.
 
-**Status: pre-alpha.** Don't run in production yet.
+## Supported systems
+
+Any heating system exposed as a `climate.*` entity in Home Assistant, including:
+- Comfortzone (RX95, etc.) via [ha-comfortzone](https://github.com/danbull21/ha-comfortzone)
+- Nibe via [ha-nibe](https://github.com/elupus/hass_nibe)
+- IVT, Thermia, Mitsubishi, etc. via their respective integrations
+- District heating + separate hot water boiler
+
+## License
+
+[Apache License 2.0](LICENSE)
