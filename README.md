@@ -1,4 +1,6 @@
-# Smart Heat Control
+<p align="center">
+  <img src="logo.svg" alt="Smart Heat Control" width="520"/>
+</p>
 
 **Pris- och väderstyrd optimering för värmepumpar, fjärrvärme och varmvattenberedare via Home Assistant.**  
 *(English summary below.)*

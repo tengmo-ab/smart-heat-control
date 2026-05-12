@@ -9,6 +9,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -24,26 +25,13 @@ class SensorDef:
     unit: str | None
     icon: str
     state_class: SensorStateClass | None = None
+    # None = main "Sensors" section on the device page (prominent).
+    # EntityCategory.DIAGNOSTIC = grouped under "Diagnostic" (collapsed by default).
+    category: EntityCategory | None = None
 
 
 _SENSORS: tuple[SensorDef, ...] = (
-    SensorDef(
-        "today_am_avg_price", "Today AM Avg Price",
-        "öre/kWh", "mdi:cash-clock", SensorStateClass.MEASUREMENT,
-    ),
-    SensorDef(
-        "today_pm_avg_price", "Today PM Avg Price",
-        "öre/kWh", "mdi:cash-clock", SensorStateClass.MEASUREMENT,
-    ),
-    SensorDef(
-        "future_highest_temp", "Future Highest Temperature",
-        UnitOfTemperature.CELSIUS, "mdi:thermometer-chevron-up",
-        SensorStateClass.MEASUREMENT,
-    ),
-    SensorDef(
-        "days_since_legionella", "Days Since Legionella",
-        "d", "mdi:bacteria-outline", SensorStateClass.MEASUREMENT,
-    ),
+    # Main outputs — what the cascade actually decided. Keep prominent.
     SensorDef(
         "target_temp", "Target Temperature",
         UnitOfTemperature.CELSIUS, "mdi:thermometer", SensorStateClass.MEASUREMENT,
@@ -52,9 +40,32 @@ _SENSORS: tuple[SensorDef, ...] = (
         "target_heat_curve", "Target Heat Curve",
         None, "mdi:chart-bell-curve", SensorStateClass.MEASUREMENT,
     ),
+    # Diagnostic — useful info but not the headline.
+    SensorDef(
+        "today_am_avg_price", "Today AM Avg Price",
+        "öre/kWh", "mdi:cash-clock", SensorStateClass.MEASUREMENT,
+        EntityCategory.DIAGNOSTIC,
+    ),
+    SensorDef(
+        "today_pm_avg_price", "Today PM Avg Price",
+        "öre/kWh", "mdi:cash-clock", SensorStateClass.MEASUREMENT,
+        EntityCategory.DIAGNOSTIC,
+    ),
+    SensorDef(
+        "future_highest_temp", "Future Highest Temperature",
+        UnitOfTemperature.CELSIUS, "mdi:thermometer-chevron-up",
+        SensorStateClass.MEASUREMENT,
+        EntityCategory.DIAGNOSTIC,
+    ),
+    SensorDef(
+        "days_since_legionella", "Days Since Legionella",
+        "d", "mdi:bacteria-outline", SensorStateClass.MEASUREMENT,
+        EntityCategory.DIAGNOSTIC,
+    ),
     SensorDef(
         "degraded_reason", "Degraded Reason",
         None, "mdi:alert-circle-outline",
+        category=EntityCategory.DIAGNOSTIC,
     ),
 )
 
@@ -88,6 +99,7 @@ class SmartHeatControlSensor(
         self._attr_native_unit_of_measurement = defn.unit
         self._attr_icon = defn.icon
         self._attr_state_class = defn.state_class
+        self._attr_entity_category = defn.category
 
     @property
     def device_info(self) -> DeviceInfo:

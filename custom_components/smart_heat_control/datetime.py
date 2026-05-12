@@ -9,6 +9,7 @@ from homeassistant.components.datetime import DateTimeEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
+from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -22,11 +23,17 @@ class DatetimeDef:
     key: str
     name: str
     icon: str
+    category: EntityCategory
 
 
 _DATETIMES: tuple[DatetimeDef, ...] = (
-    DatetimeDef("vacation_end", "Vacation End", "mdi:beach"),
-    DatetimeDef("last_legionella_run", "Last Legionella Run", "mdi:bacteria"),
+    DatetimeDef("vacation_end", "Vacation End", "mdi:beach", EntityCategory.CONFIG),
+    DatetimeDef(
+        "last_legionella_run",
+        "Last Legionella Run",
+        "mdi:bacteria",
+        EntityCategory.DIAGNOSTIC,
+    ),
 )
 
 
@@ -57,6 +64,7 @@ class SmartHeatControlDatetime(
         self._attr_unique_id = f"{entry.entry_id}_{defn.key}"
         self._attr_name = defn.name
         self._attr_icon = defn.icon
+        self._attr_entity_category = defn.category
         self._value: datetime | None = None
 
     @property
