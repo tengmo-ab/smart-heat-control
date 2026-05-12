@@ -248,22 +248,52 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
     # ------------------------------------------------------------------
 
     async def _async_update_data(self) -> FullDecision:
-        """Run one full cascade evaluation and write back to bound entities."""
+        """Run one full cascade evaluation and write back to bound entities.
+
+        Each phase is wrapped in its own try/except so the log line tells you
+        exactly *which* phase failed (input reading vs. health-assessment vs.
+        compute vs. controller vs. apply). Increase log level with::
+
+            service: logger.set_level
+            data:
+              custom_components.smart_heat_control: debug
+        """
+        phase = "start"
         try:
+            phase = "read_inputs"
             tz = ZoneInfo(self.hass.config.time_zone)
             inputs = self._read_inputs(tz)
+
+            phase = "assess_health"
             health = assess_health(inputs)
+
+            phase = "compute"
             computed_data = compute(inputs, health, self.hass.config.time_zone)
             self._last_computed = computed_data
+
+            phase = "decide"
             decision = decide(inputs, computed_data, health)
+
+            _LOGGER.debug(
+                "SHC cascade: mode=%s hw_mode=%s degraded=%s "
+                "indoor=%.1f outdoor=%.1f master=%s",
+                decision.climate.mode,
+                decision.hot_water.mode,
+                decision.degraded_reason or "no",
+                inputs.indoor_temp if inputs.indoor_temp is not None else -99,
+                inputs.outdoor_temp if inputs.outdoor_temp is not None else -99,
+                inputs.master_enabled,
+            )
 
             # Reset when master goes OFF (only on the falling edge)
             if self._prev_master_enabled and not inputs.master_enabled:
+                phase = "reset_to_defaults"
                 await self._reset_to_defaults()
             self._prev_master_enabled = inputs.master_enabled
 
             # Apply decisions to bound external entities
             if inputs.master_enabled and health.has_room_temp_signal:
+                phase = "apply"
                 await self._apply(decision)
 
             # Handle legionella boost trigger
@@ -274,13 +304,24 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
                     hours=self.legionella_duration_hours
                 )
                 _LOGGER.info(
-                    "Legionella boost triggered (days since last: %d)",
+                    "SHC: Legionella boost triggered (days since last: %d)",
                     computed_data.days_since_legionella,
                 )
 
             return decision
         except Exception as exc:
-            raise UpdateFailed(f"Cascade evaluation failed: {exc}") from exc
+            # Log the full traceback before wrapping — UpdateFailed alone hides
+            # the stack and makes user-side debugging painful.
+            _LOGGER.exception(
+                "SHC cascade failed in phase '%s': %s. "
+                "Check the entities bound in the config flow — most failures "
+                "here come from an entity returning 'unavailable' or a value "
+                "the parser can't read (e.g. a Nord Pool sensor with no "
+                "'prices' attribute).",
+                phase,
+                exc,
+            )
+            raise UpdateFailed(f"Cascade evaluation failed in phase '{phase}': {exc}") from exc
 
     # ------------------------------------------------------------------
     # Input reading

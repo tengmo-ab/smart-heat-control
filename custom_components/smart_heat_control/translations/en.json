@@ -64,10 +64,12 @@
       }
     },
     "error": {
-      "unknown": "Unexpected error"
+      "unknown": "An unexpected error occurred. Open Settings → System → Logs and search for 'smart_heat_control' — the full traceback is logged there.",
+      "invalid_entity": "One of the entities you selected is no longer available."
     },
     "abort": {
-      "already_configured": "Smart Heat Control is already configured"
+      "already_configured": "Smart Heat Control is already configured",
+      "schema_build_failed": "The integration could not build this form. This is a bug — please open an issue on GitHub and include the HA log entry for 'smart_heat_control'."
     }
   },
   "options": {
