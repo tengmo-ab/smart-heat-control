@@ -233,6 +233,11 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         self._hw_reduction_on_since: datetime | None = None
         self._hot_water_making_since: datetime | None = None
         self._prev_master_enabled: bool = False
+        # Falling-edge tracker for the legionella switch: when the user turns
+        # the switch off, we cancel any in-progress boost by clearing the
+        # end-time. Otherwise toggling back on later would silently resume the
+        # original boost window.
+        self._prev_legionella_enabled: bool = False
 
         # Rolling sample buffers for 60-min averages
         self._compressor_samples: deque[tuple[datetime, float]] = deque()
@@ -290,6 +295,19 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
                 phase = "reset_to_defaults"
                 await self._reset_to_defaults()
             self._prev_master_enabled = inputs.master_enabled
+
+            # Cancel any active legionella boost on falling edge of the switch.
+            # The computed.is_legionella_boost_active gate already makes the
+            # HW cascade behave correctly while the switch is off, but clearing
+            # the timer here ensures a subsequent "switch back on" starts a
+            # fresh boost rather than silently resuming the cancelled one.
+            if self._prev_legionella_enabled and not inputs.legionella_boost_enabled:
+                if self._legionella_boost_end is not None:
+                    _LOGGER.info(
+                        "SHC: Legionella switch turned off mid-boost — cancelling boost timer"
+                    )
+                self._legionella_boost_end = None
+            self._prev_legionella_enabled = inputs.legionella_boost_enabled
 
             # Apply decisions to bound external entities
             if inputs.master_enabled and health.has_room_temp_signal:

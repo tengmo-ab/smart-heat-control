@@ -88,8 +88,13 @@ def compute(inputs: Inputs, health: Health, tz_name: str) -> Computed:
         else 0.0
     )
 
+    # An active boost requires BOTH the user-controlled switch and a valid
+    # end-time in the future. Without the switch gate, turning the switch OFF
+    # mid-boost would not cancel it — the HW cascade would keep returning a
+    # 60°C setpoint until the original timer expired, contradicting the UI.
     is_legionella_boost_active = (
-        inputs.legionella_boost_end is not None
+        inputs.legionella_boost_enabled
+        and inputs.legionella_boost_end is not None
         and now_ts < inputs.legionella_boost_end
     )
     days_since_legionella = (
