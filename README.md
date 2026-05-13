@@ -80,7 +80,7 @@ custom_components/smart_heat_control/
 | Power | `compressor_power_sensor` | Valfri | "Full kompressor"-detektering avstängd |
 | Power | `aux_power_sensor` | Valfri | Tillsatsskydd avstängt — kan ge mer aux-drift |
 | Pricing | `price_sensor` | **Krav för prisopt.** | Hela pris-grenen avstängd, väder-only |
-| Pricing | `price_today_sensor` | Valfri | Ingen kvartalsprisanalys (96-values) |
+| Pricing | `price_today_sensor` | **Starkt rekommenderad** | Utan denna: ingen Price Peak Reduction, ingen AM/PM-split, ingen Expensive Evening-detektion, inget today_avg. Bara `current_price` styr. Sensorn ska ha ett `prices`-attribut med 96 kvartalsvärden (list eller CSV) eller ett `data`-attribut med 96 dicts. |
 | Weather | `weather_forecast_entity` | Valfri | Månadsbaserad winter-fallback, väder-anticipation av |
 | Solar/PV | `pv_excess_binary_sensor` | Valfri | Inga PV-överskotts-justeringar |
 | Solar/PV | `solar_forecast_today_sensor` | Valfri | "Survive solar"-läget avstängt |
@@ -107,8 +107,10 @@ Integrationen rapporterar nedgraderingen via `select.smart_heat_control_optimiza
 - [x] Controller (1:1-port av v1 kaskad — Weather → Price Peak → Cheap → Default + VV + legionella)
 - [x] Entity-plattformar (switch, number, select, sensor, binary_sensor, datetime)
 - [x] Coordinator med rolling buffers, HW-reduktion state machine, write-only-if-changed
+- [x] Engelska översättningar (`translations/en.json`)
+- [x] PNG-ikoner för HA 2026.3 local-brands (`brand/icon.png` + `logo.png` + @2x)
+- [ ] Svenska översättningar (`translations/sv.json`)
 - [ ] Testsvit (`tests/test_controller.py` med scenario per gren)
-- [ ] Översättningar (`translations/en.json`, `translations/sv.json`)
 - [ ] Diagnostik (redacted dump för felsökning)
 - [ ] Stats-migrationsguide för existerande v1-användare (comfortzone_settings_controller)
 - [ ] HACS-listning (default store)
