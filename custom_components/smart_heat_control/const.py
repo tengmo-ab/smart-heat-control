@@ -29,8 +29,12 @@ CONF_AUX_POWER_SENSOR = "aux_power_sensor"
 
 # Pricing
 CONF_PRICE_SENSOR = "price_sensor"
-# Optional — if omitted we derive today's average from the price_sensor's
-# `today` attribute (Nord Pool convention).
+# Today's quarter-resolution prices. Required for Price Peak Reduction,
+# AM/PM split, expensive_evening detection, and today's average price.
+# Without this sensor we operate on the current price only — much weaker
+# optimization. Nord Pool exposes 96 quarters in the ``prices`` attribute
+# (or 96 dicts in ``data``). The state itself is the *current* quarter
+# price, not the average — today_avg is computed from the quarters.
 CONF_PRICE_TODAY_SENSOR = "price_today_sensor"
 
 # Weather (recommended)

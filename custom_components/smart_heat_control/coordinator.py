@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -104,26 +104,67 @@ def _read_pump_activity(hass: HomeAssistant, entity_id: str | None) -> PumpActiv
 
 
 def _parse_price_quarters(hass: HomeAssistant, entity_id: str | None) -> tuple[float, ...]:
-    """Parse the Nord Pool `prices` attribute into 96 floats (quarter resolution)."""
+    """Parse the Nord Pool ``prices`` attribute into 96 floats (quarter resolution).
+
+    Nord Pool exposes ``prices`` as a Python ``list[float]`` of length 96 —
+    the comma-separated rendering you see in HA's developer-tools is the UI
+    serialising the list, not the actual attribute value. Some other vendors
+    expose it as a CSV string, so handle both.
+
+    Also accepts the alternative ``data`` attribute (list of
+    ``{start, end, price}`` dicts at 15-min resolution) when ``prices`` is
+    missing.
+    """
     if not entity_id:
         return ()
     state = hass.states.get(entity_id)
     if state is None or state.state in ("unavailable", "unknown"):
         return ()
+
     raw = state.attributes.get("prices")
-    if not raw:
-        return ()
-    try:
-        parts = [float(p.strip()) for p in str(raw).split(",") if p.strip()]
-        return tuple(parts) if len(parts) == QUARTERS_PER_DAY else ()
-    except (ValueError, TypeError):
-        return ()
+    parts: list[float] = []
+    if isinstance(raw, (list, tuple)):
+        for p in raw:
+            if p is None:
+                continue
+            try:
+                parts.append(float(p))
+            except (ValueError, TypeError):
+                return ()
+    elif raw:
+        try:
+            parts = [float(p.strip()) for p in str(raw).split(",") if p.strip()]
+        except (ValueError, TypeError):
+            return ()
+
+    # Fallback: parse from ``data`` attribute (list of dicts with ``price``)
+    if not parts:
+        data = state.attributes.get("data")
+        if isinstance(data, list):
+            try:
+                parts = [float(entry["price"]) for entry in data if "price" in entry]
+            except (ValueError, TypeError, KeyError):
+                return ()
+
+    return tuple(parts) if len(parts) == QUARTERS_PER_DAY else ()
 
 
 def _parse_forecast(
     hass: HomeAssistant, entity_id: str | None, tz: ZoneInfo
 ) -> tuple[ForecastDay, ...]:
-    """Parse the SMHI/generic forecast attribute into ForecastDay tuples."""
+    """Parse the SMHI/generic forecast attribute into ForecastDay tuples.
+
+    SMHI's daily forecast emits *two* entries per "today": a midnight-local
+    snapshot of the current weather (datetime at previous-day 22:00 UTC for
+    CEST) followed by the daily summary at local 14:00 (12:00 UTC). Both map
+    to the same local date, so a naïve "first entry whose date >= today"
+    lookup picks the snapshot — making future_highest_temp reflect the
+    *current* outdoor temperature instead of the day's high.
+
+    Fix: deduplicate by local date, preferring the entry whose local hour is
+    closest to noon (the daily-summary anchor). Single-entry-per-day
+    providers are unaffected since their one entry is also the closest-to-noon.
+    """
     if not entity_id:
         return ()
     state = hass.states.get(entity_id)
@@ -132,22 +173,31 @@ def _parse_forecast(
     raw_list = state.attributes.get("forecast", [])
     if not isinstance(raw_list, list):
         return ()
-    days: list[ForecastDay] = []
+
+    best: dict[date, tuple[int, ForecastDay]] = {}
     for entry in raw_list:
         try:
             dt_str = entry.get("datetime", "")
-            day = datetime.fromisoformat(str(dt_str)).astimezone(tz).date()
-            days.append(
-                ForecastDay(
-                    day=day,
-                    temperature=_to_float(entry.get("temperature")),
-                    templow=_to_float(entry.get("templow")),
-                    condition=entry.get("condition"),
-                )
-            )
+            local_dt = datetime.fromisoformat(str(dt_str)).astimezone(tz)
         except (ValueError, TypeError, AttributeError):
             continue
-    return tuple(days)
+        local_date = local_dt.date()
+        # Lower score = closer to local noon; daily summaries score 2 (hour=14),
+        # midnight snapshots score 12 (hour=0).
+        score = abs(local_dt.hour - 12)
+        if local_date in best and score >= best[local_date][0]:
+            continue
+        best[local_date] = (
+            score,
+            ForecastDay(
+                day=local_date,
+                temperature=_to_float(entry.get("temperature")),
+                templow=_to_float(entry.get("templow")),
+                condition=entry.get("condition"),
+            ),
+        )
+
+    return tuple(best[d][1] for d in sorted(best.keys()))
 
 
 def _read_sun(hass: HomeAssistant) -> tuple[bool, datetime | None]:
@@ -397,10 +447,19 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         )
 
         # Pricing
+        # Compute today_avg from the 96 quarters when available — Nord Pool's
+        # _price_today sensor exposes the *current* quarter price as state,
+        # NOT today's average. Reading state.state as the average gave a
+        # ~100-öre value that drifted with the live price and made every
+        # "is current price above/below today_avg" gate flip every quarter.
         price_today_id = cfg.get(CONF_PRICE_TODAY_SENSOR)
         current_price = _read_float(hass, cfg.get(CONF_PRICE_SENSOR))
-        today_avg = _read_float(hass, price_today_id)
         price_quarters = _parse_price_quarters(hass, price_today_id)
+        if price_quarters:
+            today_avg: float | None = sum(price_quarters) / len(price_quarters)
+        else:
+            # Fallback for vendors that DO expose the average as state
+            today_avg = _read_float(hass, price_today_id)
 
         # Weather
         weather_forecast = _parse_forecast(

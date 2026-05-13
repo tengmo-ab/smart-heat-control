@@ -130,7 +130,9 @@ class SmartHeatControlSensor(
         if key == "target_heat_curve":
             return decision.climate.target_curve
         if key == "degraded_reason":
-            return decision.degraded_reason
+            # None → "ok" so users can tell "everything healthy" from
+            # "the sensor itself is broken" (the latter renders as unknown).
+            return decision.degraded_reason or "ok"
         return None
 
     def _from_computed(self, attr: str) -> Any:
