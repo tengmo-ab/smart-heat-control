@@ -83,6 +83,16 @@ CONTROL_INTERVAL_SECONDS = 300
 # som finns för att den underliggande integrationen inte ska tappa skrivningar.
 WRITE_SETTLE_DELAY_SECONDS = 5
 
+# Anti-flap: block re-entry into a higher-demand mode for this long after
+# leaving it. Downgrades (toward less compressor strain) are never blocked —
+# we always allow Cheap Price → Default → Price Peak transitions immediately.
+# Only UPGRADE transitions (Default → Cheap Price, Price Peak → Default,
+# Default → Night Boost, …) are subject to the cooldown. Prevents the
+# compressor from being asked to accelerate-then-decelerate every few minutes
+# when prices/conditions oscillate near a threshold. User-initiated switch
+# toggles bypass this cooldown (see _detect_user_action in coordinator).
+MODE_REENTRY_COOLDOWN_SECONDS = 1200  # 20 min
+
 # ---------------------------------------------------------------------------
 # Optimization mode strings — exposed via select.<>_optimization_mode and
 # select.<>_hw_mode. Stable strings: byts inte utan migrations-script eftersom

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from collections import deque
 from datetime import date, datetime, timedelta
@@ -52,6 +53,7 @@ from .const import (
     HW_REDUCTION_HEATING_TIMEOUT_HOURS,
     HW_REDUCTION_NO_HEATING_TIMEOUT_MINUTES,
     HW_REDUCTION_TRIGGER_HOURS,
+    MODE_REENTRY_COOLDOWN_SECONDS,
     QUARTERS_PER_DAY,
     WRITE_SETTLE_DELAY_SECONDS,
 )
@@ -59,6 +61,31 @@ from .controller import decide
 from .models import ForecastDay, FullDecision, Inputs, Mode, PumpActivity
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Mode demand levels for anti-flap hysteresis.
+#
+# Higher level = more compressor strain. Only UPGRADE transitions (toward
+# higher demand) are gated by the re-entry cooldown — downgrades always pass
+# through immediately so we never miss a price-peak reduction or a forced
+# back-off. Keep these as plain strings so we don't need an enum import.
+# ---------------------------------------------------------------------------
+_MODE_DEMAND_LEVEL: dict[str, int] = {
+    "Price Peak Reduction": 0,
+    "Weather Anticipation Reduction": 1,
+    "Default": 2,
+    "Cheap Price Intensify": 3,
+}
+
+_HW_MODE_DEMAND_LEVEL: dict[str, int] = {
+    "Price Peak Reduction": 0,
+    "Heating Priority": 0,
+    "Default": 1,
+    "Night Boost": 2,
+    "Mid-day Boost": 2,
+    "Legionella Boost": 3,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +321,19 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         self._heating_samples: deque[tuple[datetime, bool]] = deque()
         self._indoor_temp_samples: deque[tuple[datetime, float]] = deque()
 
+        # Anti-flap hysteresis state.
+        # _last_decision is the most recent FullDecision *after* any hysteresis
+        # holds were applied — i.e. what we actually told the hardware. We
+        # compare new decisions against this so a held mode keeps being held.
+        # _mode_last_exit_time records when we last left each mode, used to
+        # block re-entry inside MODE_REENTRY_COOLDOWN_SECONDS.
+        # _prev_user_switches snapshots integration-owned + bound switches so
+        # we can detect when the user toggled something and bypass cooldowns.
+        self._last_decision: FullDecision | None = None
+        self._mode_last_exit_time: dict[str, datetime] = {}
+        self._hw_mode_last_exit_time: dict[str, datetime] = {}
+        self._prev_user_switches: dict[str, bool] | None = None
+
         self._unsub_state_listener = None
         # Stored for diagnostic sensors (not part of FullDecision to keep it pure)
         self._last_computed = None
@@ -328,6 +368,12 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
 
             phase = "decide"
             decision = decide(inputs, computed_data, health)
+
+            phase = "hysteresis"
+            user_action = self._detect_user_action(inputs)
+            decision = self._apply_mode_hysteresis(
+                decision, inputs.now, bypass=user_action
+            )
 
             _LOGGER.debug(
                 "SHC cascade: mode=%s hw_mode=%s degraded=%s "
@@ -390,6 +436,125 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
                 exc,
             )
             raise UpdateFailed(f"Cascade evaluation failed in phase '{phase}': {exc}") from exc
+
+    # ------------------------------------------------------------------
+    # Anti-flap hysteresis
+    # ------------------------------------------------------------------
+
+    def _detect_user_action(self, inputs: Inputs) -> bool:
+        """Return True when any user-controlled switch flipped since last cycle.
+
+        Used by the hysteresis layer to bypass the re-entry cooldown — when
+        the user toggles something (e.g. flips Legionella Boost on, or turns
+        the bound Extra-HW switch off), they expect the resulting mode change
+        immediately. Auto-flap protection only applies to cascade-driven
+        oscillation between cycles where no human intervened.
+
+        First call after startup returns False (we have no baseline yet).
+        """
+        current = {
+            "master": inputs.master_enabled,
+            "cheap_price": inputs.cheap_price_enabled,
+            "price_peak": inputs.price_peak_enabled,
+            "weather": inputs.weather_anticipation_enabled,
+            "legionella": inputs.legionella_boost_enabled,
+            "survive_solar": inputs.survive_solar_enabled,
+            "hw_extra": bool(inputs.hot_water_extra_on),
+        }
+        changed = (
+            self._prev_user_switches is not None
+            and current != self._prev_user_switches
+        )
+        self._prev_user_switches = current
+        if changed:
+            _LOGGER.debug("SHC: user switch flipped — bypassing mode cooldown this cycle")
+        return changed
+
+    def _apply_mode_hysteresis(
+        self, decision: FullDecision, now: datetime, *, bypass: bool
+    ) -> FullDecision:
+        """Block upgrades to a recently-exited mode; downgrades always pass.
+
+        For each of the two mode dimensions (climate, hot_water):
+        - Compute the demand level of the proposed mode and the previously
+          applied mode using ``_MODE_DEMAND_LEVEL`` / ``_HW_MODE_DEMAND_LEVEL``.
+        - If proposed level > previous level (UPGRADE), and we left the
+          proposed mode within ``MODE_REENTRY_COOLDOWN_SECONDS``, hold the
+          previous decision for that dimension (mode + temp + curve, kept
+          together so the UI never shows e.g. "Cheap Price" with Default temp).
+        - When the transition is allowed (or bypassed), record the exit time
+          of the previous mode so a subsequent flap back into it gets gated.
+
+        ``bypass=True`` (set by ``_detect_user_action``) skips the cooldown
+        check but still records exits — so user-initiated transitions are
+        instant but follow-up cascade flaps are still blocked.
+
+        Cold start (``_last_decision is None``): pass the decision through
+        unchanged and seed the baseline.
+        """
+        if self._last_decision is None:
+            self._last_decision = decision
+            return decision
+
+        prev = self._last_decision
+        final_climate = decision.climate
+        final_hw = decision.hot_water
+
+        # --- Climate mode ---
+        if decision.climate.mode != prev.climate.mode:
+            prev_lvl = _MODE_DEMAND_LEVEL.get(str(prev.climate.mode), 2)
+            new_lvl = _MODE_DEMAND_LEVEL.get(str(decision.climate.mode), 2)
+            is_upgrade = new_lvl > prev_lvl
+            blocked = False
+            if is_upgrade and not bypass:
+                last_exit = self._mode_last_exit_time.get(str(decision.climate.mode))
+                if last_exit is not None:
+                    elapsed = (now - last_exit).total_seconds()
+                    if elapsed < MODE_REENTRY_COOLDOWN_SECONDS:
+                        _LOGGER.info(
+                            "SHC anti-flap: holding %s, blocked upgrade to %s "
+                            "(last left %.0fs ago, cooldown %ds)",
+                            prev.climate.mode,
+                            decision.climate.mode,
+                            elapsed,
+                            MODE_REENTRY_COOLDOWN_SECONDS,
+                        )
+                        final_climate = prev.climate
+                        blocked = True
+            if not blocked:
+                # Transition is happening — record exit of previous mode
+                self._mode_last_exit_time[str(prev.climate.mode)] = now
+
+        # --- Hot water mode ---
+        if decision.hot_water.mode != prev.hot_water.mode:
+            prev_lvl = _HW_MODE_DEMAND_LEVEL.get(str(prev.hot_water.mode), 1)
+            new_lvl = _HW_MODE_DEMAND_LEVEL.get(str(decision.hot_water.mode), 1)
+            is_upgrade = new_lvl > prev_lvl
+            blocked = False
+            if is_upgrade and not bypass:
+                last_exit = self._hw_mode_last_exit_time.get(
+                    str(decision.hot_water.mode)
+                )
+                if last_exit is not None:
+                    elapsed = (now - last_exit).total_seconds()
+                    if elapsed < MODE_REENTRY_COOLDOWN_SECONDS:
+                        _LOGGER.info(
+                            "SHC anti-flap: holding HW %s, blocked upgrade to %s "
+                            "(last left %.0fs ago)",
+                            prev.hot_water.mode,
+                            decision.hot_water.mode,
+                            elapsed,
+                        )
+                        final_hw = prev.hot_water
+                        blocked = True
+            if not blocked:
+                self._hw_mode_last_exit_time[str(prev.hot_water.mode)] = now
+
+        result = dataclasses.replace(
+            decision, climate=final_climate, hot_water=final_hw
+        )
+        self._last_decision = result
+        return result
 
     # ------------------------------------------------------------------
     # Input reading
