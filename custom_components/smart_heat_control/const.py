@@ -83,6 +83,19 @@ CONTROL_INTERVAL_SECONDS = 300
 # som finns för att den underliggande integrationen inte ska tappa skrivningar.
 WRITE_SETTLE_DELAY_SECONDS = 5
 
+# Anti-overheat override thresholds for Weather Anticipation.
+# When indoor_max_recent_temp >= default + WEATHER_OVERRIDE_INDOOR_DELTA_C
+# AND future_highest_temp >= WEATHER_OVERRIDE_FUTURE_HIGH_C (and not winter),
+# Weather Anticipation triggers regardless of current price.
+# v1 always required current_price >= today_avg to trigger Weather
+# Anticipation — meaning that on a cheap-but-warm night before a sunny
+# warm day, the cascade would fall through to Cheap Price Intensify and
+# pre-heat an already-warm house. v2 adds this override so we trust the
+# coming solar gain instead of dumping electricity into a building that
+# will overheat anyway.
+WEATHER_OVERRIDE_INDOOR_DELTA_C = 1.0   # °C above default_indoor_temp
+WEATHER_OVERRIDE_FUTURE_HIGH_C = 12.0   # °C — clearly warm spring/summer day
+
 # Anti-flap: block re-entry into a higher-demand mode for this long after
 # leaving it. Downgrades (toward less compressor strain) are never blocked —
 # we always allow Cheap Price → Default → Price Peak transitions immediately.

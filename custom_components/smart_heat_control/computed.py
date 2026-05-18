@@ -42,6 +42,8 @@ from .const import (
     QUARTERS_PER_DAY,
     VERY_CHEAP_VS_RECENT_RATIO,
     WAIT_FOR_SUN_PV_KWH_THRESHOLD,
+    WEATHER_OVERRIDE_FUTURE_HIGH_C,
+    WEATHER_OVERRIDE_INDOOR_DELTA_C,
     WINTER_MONTHS_FALLBACK,
 )
 from .models import Computed, ForecastDay, Health, Inputs
@@ -363,7 +365,9 @@ def compute(inputs: Inputs, health: Health, tz_name: str) -> Computed:
         default_indoor_temp=d_indoor,
         weather_temp_logic=weather_temp_logic,
         is_night_cold=is_night_cold,
+        is_winter=is_winter,
         outdoor_temp=inputs.outdoor_temp,
+        future_highest_temp=future_highest_temp,
         current_price=cp,
         today_avg=ta,
     )
@@ -636,7 +640,9 @@ def _compute_weather_active_conditions_met(
     default_indoor_temp: float,
     weather_temp_logic: bool,
     is_night_cold: bool,
+    is_winter: bool,
     outdoor_temp: float | None,
+    future_highest_temp: float | None,
     current_price: float | None,
     today_avg: float | None,
 ) -> bool:
@@ -652,6 +658,13 @@ def _compute_weather_active_conditions_met(
              (current_price >= 0 and current_price >= today_avg_price)
            )
         }}
+
+    FIX (v2): an anti-overheat override bypasses the price gate when the
+    building is already significantly above default-indoor-temp AND today's
+    forecast high promises substantial solar/ambient warming. Without it, v1
+    would fall through to Cheap Price Intensify on a below-average-priced
+    night and pre-heat a house that's already too warm — wasted electricity
+    plus an overheated daytime when solar gain arrives.
     """
     # Degraded path — bridge-to-solar or solar-survival forces reduction
     if not has_pv_excess and (is_bridge_active or wait_for_sun):
@@ -678,6 +691,21 @@ def _compute_weather_active_conditions_met(
     )
     if not temp_ok:
         return False
+
+    # FIX (v2): anti-overheat override — building already clearly above target
+    # AND today's high will warm it further → trigger reduction regardless of
+    # current price. Keeps us from pre-heating an overheated house at a cheap
+    # midnight just because a morning peak is coming; the day's solar gain
+    # will maintain comfort without our help.
+    if (
+        not is_winter
+        and indoor_max_recent_temp is not None
+        and indoor_max_recent_temp
+        >= default_indoor_temp + WEATHER_OVERRIDE_INDOOR_DELTA_C
+        and future_highest_temp is not None
+        and future_highest_temp >= WEATHER_OVERRIDE_FUTURE_HIGH_C
+    ):
+        return True
 
     # Price gate — only reduce when price is at or above today's average
     if current_price is None or today_avg is None:
