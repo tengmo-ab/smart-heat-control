@@ -118,9 +118,11 @@ class SmartHeatControlSensor(
         key = self._defn.key
         if key == "today_am_avg_price":
             # Computed values not stored in FullDecision — re-derive from coordinator
-            return self._from_computed("today_am_avg_price")
+            val = self._from_computed("today_am_avg_price")
+            return round(val) if val is not None else None
         if key == "today_pm_avg_price":
-            return self._from_computed("today_pm_avg_price")
+            val = self._from_computed("today_pm_avg_price")
+            return round(val) if val is not None else None
         if key == "future_highest_temp":
             return self._from_computed("future_highest_temp")
         if key == "days_since_legionella":
