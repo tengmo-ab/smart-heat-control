@@ -83,6 +83,18 @@ CONTROL_INTERVAL_SECONDS = 300
 # som finns för att den underliggande integrationen inte ska tappa skrivningar.
 WRITE_SETTLE_DELAY_SECONDS = 5
 
+# Summer coast — climate-only "no heating needed" override modelled on the
+# Comfortzone built-in summer mode. When today's high, tomorrow's high, and
+# the current outdoor all signal warm conditions, Weather Anticipation
+# Reduction is triggered regardless of hour or price. Lets the building
+# coast on solar + ambient warmth instead of paying for heat that the
+# afternoon sun will overshoot anyway. Indoor floor (default - 0.5 °C)
+# is a safety net so an unexpected cold morning still gets heat. The
+# *hot-water* cascade is unaffected — only the climate branch is gated here.
+SUMMER_TODAY_HIGH_C = 18.0     # °C — today's daily high (forecast)
+SUMMER_TOMORROW_HIGH_C = 13.0  # °C — tomorrow's daily high (don't coast if a cold day follows)
+SUMMER_OUTDOOR_C = 12.0        # °C — current outdoor temp (already mild now)
+
 # Anti-overheat override thresholds for Weather Anticipation.
 # When indoor_max_recent_temp >= default + WEATHER_OVERRIDE_INDOOR_DELTA_C
 # AND future_highest_temp >= WEATHER_OVERRIDE_FUTURE_HIGH_C (and not winter),
