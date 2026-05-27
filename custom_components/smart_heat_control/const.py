@@ -68,6 +68,20 @@ DEFAULT_LEGIONELLA_MIN_DAYS = 6
 DEFAULT_LEGIONELLA_MAX_DAYS = 10
 DEFAULT_LEGIONELLA_DURATION_HOURS = 2
 
+# Passive legionella detection — credit a pasteurization event whenever the
+# hot-water tank reaches LEGIONELLA_PASSIVE_THRESHOLD_C and sustains it for
+# LEGIONELLA_PASSIVE_SUSTAIN_MINUTES, regardless of which mode caused the
+# heat (Mid-day Boost, manual extra HW, Comfortzone-internal, etc.). Without
+# this, days_since_legionella only counts SHC-triggered boosts and grows
+# unbounded when the user has the legionella switch off — even though the
+# tank gets hot regularly via normal operation. WHO/Boverket guidance:
+# 60 °C sustained for 30 min kills legionella.
+LEGIONELLA_PASSIVE_THRESHOLD_C = 60.0
+LEGIONELLA_PASSIVE_SUSTAIN_MINUTES = 30
+# 1 °C hysteresis below threshold before resetting the session timer — so a
+# 5-min cycle that reads 59.5 °C doesn't restart the 30-min count.
+LEGIONELLA_PASSIVE_EXIT_C = 59.0
+
 # Safety bounds (matchar v1 min_climate_temp / max_climate_temp osv.)
 MIN_CLIMATE_TEMP = 10.0
 MAX_CLIMATE_TEMP = 25.0

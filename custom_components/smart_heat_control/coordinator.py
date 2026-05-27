@@ -53,6 +53,9 @@ from .const import (
     HW_REDUCTION_HEATING_TIMEOUT_HOURS,
     HW_REDUCTION_NO_HEATING_TIMEOUT_MINUTES,
     HW_REDUCTION_TRIGGER_HOURS,
+    LEGIONELLA_PASSIVE_EXIT_C,
+    LEGIONELLA_PASSIVE_SUSTAIN_MINUTES,
+    LEGIONELLA_PASSIVE_THRESHOLD_C,
     MODE_REENTRY_COOLDOWN_SECONDS,
     QUARTERS_PER_DAY,
     WRITE_SETTLE_DELAY_SECONDS,
@@ -304,6 +307,10 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         # Internal runtime state — not user-settable, not persisted via entities
         # -------------------------------------------------------------------
         self._legionella_boost_end: datetime | None = None
+        # Passive legionella detection: when did HW first reach the
+        # pasteurization threshold? Reset when HW drops below the hysteresis
+        # exit point. See _update_passive_legionella_tracker.
+        self._hw_hot_since: datetime | None = None
         self._aux_power_zero_since: datetime | None = None
         self._prev_aux_power_w: float | None = None
         self._hw_reduction_active: bool = False
@@ -358,6 +365,11 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
             phase = "read_inputs"
             tz = ZoneInfo(self.hass.config.time_zone)
             inputs = self._read_inputs(tz)
+
+            phase = "passive_legionella"
+            self._update_passive_legionella_tracker(
+                inputs.hot_water_temp, inputs.now
+            )
 
             phase = "assess_health"
             health = assess_health(inputs)
@@ -690,6 +702,55 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
     # ------------------------------------------------------------------
     # Internal state machines
     # ------------------------------------------------------------------
+
+    def _update_passive_legionella_tracker(
+        self, hw_temp: float | None, now: datetime
+    ) -> None:
+        """Credit a legionella event whenever HW reaches pasteurization temp.
+
+        Boverket / WHO guidance: 60 °C sustained for 30 min kills legionella.
+        When the tank hits this naturally — Mid-day Boost, Cheap Price boost,
+        manual Extra-HW, anything — we should credit it so
+        ``days_since_legionella`` reflects *actual* pasteurization events
+        rather than only SHC-triggered legionella cycles.
+
+        A 1 °C hysteresis below the threshold avoids restarting the 30-min
+        timer when the HW sensor reads 59.5 °C between cycles.
+
+        If the HW temp sensor is unbound or temporarily unavailable
+        (``hw_temp is None``), we just keep the existing timer rather than
+        resetting it — a sensor outage isn't evidence that the tank cooled.
+        """
+        if hw_temp is None:
+            return
+
+        if hw_temp >= LEGIONELLA_PASSIVE_THRESHOLD_C:
+            if self._hw_hot_since is None:
+                self._hw_hot_since = now
+        elif hw_temp < LEGIONELLA_PASSIVE_EXIT_C:
+            self._hw_hot_since = None
+        # else: inside hysteresis band — keep the running timer
+
+        if self._hw_hot_since is None:
+            return
+
+        elapsed = (now - self._hw_hot_since).total_seconds()
+        if elapsed < LEGIONELLA_PASSIVE_SUSTAIN_MINUTES * 60:
+            return
+
+        # Credit once per hot session — guard against repeated logging while
+        # the tank stays hot for hours (e.g. an explicit Legionella Boost)
+        if (
+            self.last_legionella_run is None
+            or self.last_legionella_run < self._hw_hot_since
+        ):
+            _LOGGER.info(
+                "SHC: passive legionella detected — HW sustained at %.1f°C "
+                "for %.0f min; crediting last_legionella_run",
+                hw_temp,
+                elapsed / 60,
+            )
+            self.last_legionella_run = now
 
     def _update_hw_reduction(self, pump: PumpActivity | None, now: datetime) -> None:
         """State machine that mirrors the three v1 HW-reduction sub-automations."""
