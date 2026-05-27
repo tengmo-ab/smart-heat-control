@@ -357,14 +357,23 @@ def compute(inputs: Inputs, health: Health, tz_name: str) -> Computed:
         min_heat_curve=MIN_HEAT_CURVE,
     )
 
+    is_summer_coast = _is_summer_coast_active(
+        is_winter=is_winter,
+        future_highest_temp=future_highest_temp,
+        tomorrow_highest_temp=tomorrow_highest_temp,
+        outdoor_temp=inputs.outdoor_temp,
+        indoor_temp=inputs.indoor_temp,
+        default_indoor_temp=d_indoor,
+    )
+
     weather_active_cond = _compute_weather_active_conditions_met(
+        is_summer_coast=is_summer_coast,
         has_pv_excess=inputs.has_pv_excess,
         is_bridge_active=inputs.is_bridge_active,
         wait_for_sun=wait_for_sun,
         is_weather_enabled=inputs.weather_anticipation_enabled,
         is_am=is_am,
         current_hour=current_hour,
-        indoor_temp=inputs.indoor_temp,
         indoor_max_recent_temp=indoor_max,
         default_indoor_temp=d_indoor,
         weather_temp_logic=weather_temp_logic,
@@ -372,7 +381,6 @@ def compute(inputs: Inputs, health: Health, tz_name: str) -> Computed:
         is_winter=is_winter,
         outdoor_temp=inputs.outdoor_temp,
         future_highest_temp=future_highest_temp,
-        tomorrow_highest_temp=tomorrow_highest_temp,
         current_price=cp,
         today_avg=ta,
     )
@@ -437,6 +445,7 @@ def compute(inputs: Inputs, health: Health, tz_name: str) -> Computed:
         weather_active_conditions_met=weather_active_cond,
         price_peak_conditions_met=price_peak_cond,
         cheap_price_conditions_met=cheap_price_cond,
+        is_summer_coast=is_summer_coast,
     )
 
 
@@ -634,14 +643,50 @@ def _compute_weather_temp_logic(
     return term1 or term2 or term3
 
 
+def _is_summer_coast_active(
+    *,
+    is_winter: bool,
+    future_highest_temp: float | None,
+    tomorrow_highest_temp: float | None,
+    outdoor_temp: float | None,
+    indoor_temp: float | None,
+    default_indoor_temp: float,
+) -> bool:
+    """Climate-only "no heating needed" override modeled on the Comfortzone
+    built-in summer mode. Returns True when *all* of:
+
+    - today's forecast high >= SUMMER_TODAY_HIGH_C
+    - tomorrow's forecast high >= SUMMER_TOMORROW_HIGH_C
+    - current outdoor >= SUMMER_OUTDOOR_C (it's already mild now)
+    - current indoor >= default - 0.5 (safety net: don't coast if cold inside)
+    - not winter (winter heat always wins)
+
+    When True the gate function returns True immediately, bypassing v1's
+    time and price gates so a sunny midday with cheap electricity doesn't
+    fall through to Cheap Price Intensify. *Hot-water* cascade is untouched.
+    """
+    if is_winter:
+        return False
+    if future_highest_temp is None or future_highest_temp < SUMMER_TODAY_HIGH_C:
+        return False
+    if tomorrow_highest_temp is None or tomorrow_highest_temp < SUMMER_TOMORROW_HIGH_C:
+        return False
+    if outdoor_temp is None or outdoor_temp < SUMMER_OUTDOOR_C:
+        return False
+    if indoor_temp is not None and indoor_temp < default_indoor_temp - 0.5:
+        return False
+    return True
+
+
 def _compute_weather_active_conditions_met(
+    *,
+    is_summer_coast: bool,
     has_pv_excess: bool,
     is_bridge_active: bool,
     wait_for_sun: bool,
     is_weather_enabled: bool,
     is_am: bool,
     current_hour: int,
-    indoor_temp: float | None,
     indoor_max_recent_temp: float | None,
     default_indoor_temp: float,
     weather_temp_logic: bool,
@@ -649,7 +694,6 @@ def _compute_weather_active_conditions_met(
     is_winter: bool,
     outdoor_temp: float | None,
     future_highest_temp: float | None,
-    tomorrow_highest_temp: float | None,
     current_price: float | None,
     today_avg: float | None,
 ) -> bool:
@@ -686,20 +730,8 @@ def _compute_weather_active_conditions_met(
     if not is_weather_enabled:
         return False
 
-    # FIX (v2): summer coast — warm now AND warm ahead → no climate heating
-    if (
-        not is_winter
-        and future_highest_temp is not None
-        and future_highest_temp >= SUMMER_TODAY_HIGH_C
-        and tomorrow_highest_temp is not None
-        and tomorrow_highest_temp >= SUMMER_TOMORROW_HIGH_C
-        and outdoor_temp is not None
-        and outdoor_temp >= SUMMER_OUTDOOR_C
-        and (
-            indoor_temp is None
-            or indoor_temp >= default_indoor_temp - 0.5
-        )
-    ):
+    # FIX (v2): summer coast — computed upstream, see _is_summer_coast_active
+    if is_summer_coast:
         return True
 
     # FIX (v2): anti-overheat — indoor already too warm + warm day → reduce

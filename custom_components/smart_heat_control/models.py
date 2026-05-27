@@ -267,6 +267,11 @@ class Computed:
     weather_active_conditions_met: bool
     price_peak_conditions_met: bool
     cheap_price_conditions_met: bool
+    # --- v2 overrides surfaced for diagnostics ---
+    # True when summer-coast override is active (climate-only — HW unchanged).
+    # When True, weather_active_conditions_met is also True, but separating the
+    # signal lets users see *why* Weather Anticipation triggered.
+    is_summer_coast: bool
 
 
 # ---------------------------------------------------------------------------

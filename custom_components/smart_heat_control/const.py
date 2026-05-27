@@ -91,7 +91,8 @@ WRITE_SETTLE_DELAY_SECONDS = 5
 # afternoon sun will overshoot anyway. Indoor floor (default - 0.5 °C)
 # is a safety net so an unexpected cold morning still gets heat. The
 # *hot-water* cascade is unaffected — only the climate branch is gated here.
-SUMMER_TODAY_HIGH_C = 18.0     # °C — today's daily high (forecast)
+SUMMER_TODAY_HIGH_C = 15.0     # °C — today's daily high (SMHI shade-measured;
+                               # in sun it feels ~3-5 °C warmer)
 SUMMER_TOMORROW_HIGH_C = 13.0  # °C — tomorrow's daily high (don't coast if a cold day follows)
 SUMMER_OUTDOOR_C = 12.0        # °C — current outdoor temp (already mild now)
 

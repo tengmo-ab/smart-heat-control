@@ -43,6 +43,12 @@ _BINARY_SENSORS: tuple[BinarySensorDef, ...] = (
         "mdi:solar-power",
         "mdi:solar-power-variant-outline",
     ),
+    BinarySensorDef(
+        "is_summer_coast",
+        "Summer Coast Active",
+        "mdi:weather-sunny",
+        "mdi:weather-sunny-off",
+    ),
 )
 
 
@@ -98,6 +104,8 @@ class SmartHeatControlBinarySensor(
             return computed.is_evening_expensive
         if key == "wait_for_sun":
             return computed.wait_for_sun
+        if key == "is_summer_coast":
+            return computed.is_summer_coast
         return None
 
     @property
