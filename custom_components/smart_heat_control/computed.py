@@ -361,7 +361,7 @@ def compute(inputs: Inputs, health: Health, tz_name: str) -> Computed:
         is_winter=is_winter,
         future_highest_temp=future_highest_temp,
         tomorrow_highest_temp=tomorrow_highest_temp,
-        outdoor_temp=inputs.outdoor_temp,
+        outdoor_recent_max=inputs.outdoor_max_recent_temp,
         indoor_temp=inputs.indoor_temp,
         default_indoor_temp=d_indoor,
     )
@@ -648,7 +648,7 @@ def _is_summer_coast_active(
     is_winter: bool,
     future_highest_temp: float | None,
     tomorrow_highest_temp: float | None,
-    outdoor_temp: float | None,
+    outdoor_recent_max: float | None,
     indoor_temp: float | None,
     default_indoor_temp: float,
 ) -> bool:
@@ -657,9 +657,15 @@ def _is_summer_coast_active(
 
     - today's forecast high >= SUMMER_TODAY_HIGH_C
     - tomorrow's forecast high >= SUMMER_TOMORROW_HIGH_C
-    - current outdoor >= SUMMER_OUTDOOR_C (it's already mild now)
+    - outdoor_recent_max (rolling 6h max) >= SUMMER_OUTDOOR_C
     - current indoor >= default - 0.5 (safety net: don't coast if cold inside)
     - not winter (winter heat always wins)
+
+    Uses the 6 h rolling outdoor *max* rather than the instantaneous outdoor
+    reading so a single 9-10 °C dawn doesn't flip the gate off-then-on the
+    moment outdoor drops below SUMMER_OUTDOOR_C. As long as the previous
+    afternoon was clearly mild, summer mode rides through the coldest part
+    of the night.
 
     When True the gate function returns True immediately, bypassing v1's
     time and price gates so a sunny midday with cheap electricity doesn't
@@ -671,7 +677,7 @@ def _is_summer_coast_active(
         return False
     if tomorrow_highest_temp is None or tomorrow_highest_temp < SUMMER_TOMORROW_HIGH_C:
         return False
-    if outdoor_temp is None or outdoor_temp < SUMMER_OUTDOOR_C:
+    if outdoor_recent_max is None or outdoor_recent_max < SUMMER_OUTDOOR_C:
         return False
     if indoor_temp is not None and indoor_temp < default_indoor_temp - 0.5:
         return False

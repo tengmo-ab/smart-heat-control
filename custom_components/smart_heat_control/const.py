@@ -108,7 +108,13 @@ WRITE_SETTLE_DELAY_SECONDS = 5
 SUMMER_TODAY_HIGH_C = 15.0     # °C — today's daily high (SMHI shade-measured;
                                # in sun it feels ~3-5 °C warmer)
 SUMMER_TOMORROW_HIGH_C = 13.0  # °C — tomorrow's daily high (don't coast if a cold day follows)
-SUMMER_OUTDOOR_C = 12.0        # °C — current outdoor temp (already mild now)
+SUMMER_OUTDOOR_C = 12.0        # °C — outdoor "recently warm" check
+# Use a rolling 6h max of outdoor temp instead of the instantaneous reading
+# so a single cool morning (typical 9-10 °C around 04:00 even in proper
+# summer) doesn't bounce us out of summer mode at sunrise and back in mid-
+# morning. The window has to be long enough to cover an overnight low but
+# short enough to react to a genuine multi-day cold spell. 6 h hits both.
+SUMMER_OUTDOOR_MAX_WINDOW_HOURS = 6
 
 # Anti-overheat override thresholds for Weather Anticipation.
 # When indoor_max_recent_temp >= default + WEATHER_OVERRIDE_INDOOR_DELTA_C

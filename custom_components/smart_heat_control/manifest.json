@@ -7,7 +7,7 @@
   "requirements": [],
   "iot_class": "calculated",
   "integration_type": "hub",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "config_flow": true,
   "issue_tracker": "https://github.com/tengmo-ab/smart-heat-control/issues"
 }

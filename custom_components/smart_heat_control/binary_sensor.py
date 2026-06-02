@@ -44,8 +44,13 @@ _BINARY_SENSORS: tuple[BinarySensorDef, ...] = (
         "mdi:solar-power-variant-outline",
     ),
     BinarySensorDef(
+        # Entity-id key kept as "is_summer_coast" so history graphs and any
+        # automations referencing binary_sensor.smart_heat_control_is_summer_coast
+        # keep working. Only the display label changes — "Summer Mode" reads
+        # better in the UI and matches the conventional name used by other
+        # heat-pump controllers (Comfortzone, etc.).
         "is_summer_coast",
-        "Summer Coast Active",
+        "Summer Mode Active",
         "mdi:weather-sunny",
         "mdi:weather-sunny-off",
     ),

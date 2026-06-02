@@ -121,6 +121,12 @@ class Inputs:
     # or computed internally by the coordinator's rolling buffer.
     indoor_max_recent_temp: float | None = None
 
+    # --- Outdoor statistics (optional) ----------------------------------
+    # Max outdoor temp over a rolling window (currently 6 h) — computed by
+    # the coordinator. Used by summer mode so a single cool dawn doesn't
+    # drop us out of coast mode for an hour at sunrise.
+    outdoor_max_recent_temp: float | None = None
+
     # --- Solar / battery (all optional) ---------------------------------
     has_pv_excess: bool = False
     is_on_battery: bool = False

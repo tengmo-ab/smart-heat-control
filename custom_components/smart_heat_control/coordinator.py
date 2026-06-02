@@ -58,6 +58,7 @@ from .const import (
     LEGIONELLA_PASSIVE_THRESHOLD_C,
     MODE_REENTRY_COOLDOWN_SECONDS,
     QUARTERS_PER_DAY,
+    SUMMER_OUTDOOR_MAX_WINDOW_HOURS,
     WRITE_SETTLE_DELAY_SECONDS,
 )
 from .controller import decide
@@ -327,6 +328,11 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         self._compressor_samples: deque[tuple[datetime, float]] = deque()
         self._heating_samples: deque[tuple[datetime, bool]] = deque()
         self._indoor_temp_samples: deque[tuple[datetime, float]] = deque()
+        # Longer-window buffer for outdoor temp — see
+        # SUMMER_OUTDOOR_MAX_WINDOW_HOURS. Used so summer mode doesn't
+        # bounce out for the few hours around dawn when outdoor briefly
+        # dips below SUMMER_OUTDOOR_C.
+        self._outdoor_temp_samples: deque[tuple[datetime, float]] = deque()
 
         # Anti-flap hysteresis state.
         # _last_decision is the most recent FullDecision *after* any hysteresis
@@ -618,9 +624,10 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         # HW reduction state machine (v1 sub-automations)
         self._update_hw_reduction(pump, now)
 
-        # Rolling buffers → avg_compressor, heating_fraction, indoor_max
-        avg_comp, heat_frac, indoor_max = self._update_rolling_buffers(
-            comp_w, pump, indoor_temp, now
+        # Rolling buffers → avg_compressor, heating_fraction, indoor_max,
+        # outdoor_max (6 h window for summer-mode stability)
+        avg_comp, heat_frac, indoor_max, outdoor_max = self._update_rolling_buffers(
+            comp_w, pump, indoor_temp, outdoor_temp, now
         )
 
         # Pricing
@@ -673,6 +680,7 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
             price_quarters=price_quarters,
             weather_forecast=weather_forecast,
             indoor_max_recent_temp=indoor_max,
+            outdoor_max_recent_temp=outdoor_max,
             has_pv_excess=has_pv_excess,
             is_on_battery=is_on_battery,
             is_bridge_active=is_bridge_active,
@@ -791,24 +799,37 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         comp_w: float | None,
         pump: PumpActivity | None,
         indoor_temp: float | None,
+        outdoor_temp: float | None,
         now: datetime,
-    ) -> tuple[float | None, float | None, float | None]:
-        """Maintain 60-min rolling buffers; return (avg_comp, heat_frac, indoor_max)."""
-        cutoff = now - timedelta(hours=1)
+    ) -> tuple[float | None, float | None, float | None, float | None]:
+        """Maintain rolling buffers; return (avg_comp, heat_frac, indoor_max, outdoor_max).
+
+        Compressor / heating / indoor use a 60-min window. Outdoor uses the
+        wider SUMMER_OUTDOOR_MAX_WINDOW_HOURS window because the only
+        consumer (summer mode) wants to know "was it warm at some point in
+        the last several hours" rather than "is it warm right now".
+        """
+        short_cutoff = now - timedelta(hours=1)
+        outdoor_cutoff = now - timedelta(hours=SUMMER_OUTDOOR_MAX_WINDOW_HOURS)
 
         if comp_w is not None:
             self._compressor_samples.append((now, comp_w))
-        while self._compressor_samples and self._compressor_samples[0][0] < cutoff:
+        while self._compressor_samples and self._compressor_samples[0][0] < short_cutoff:
             self._compressor_samples.popleft()
 
         self._heating_samples.append((now, pump == PumpActivity.HEATING))
-        while self._heating_samples and self._heating_samples[0][0] < cutoff:
+        while self._heating_samples and self._heating_samples[0][0] < short_cutoff:
             self._heating_samples.popleft()
 
         if indoor_temp is not None:
             self._indoor_temp_samples.append((now, indoor_temp))
-        while self._indoor_temp_samples and self._indoor_temp_samples[0][0] < cutoff:
+        while self._indoor_temp_samples and self._indoor_temp_samples[0][0] < short_cutoff:
             self._indoor_temp_samples.popleft()
+
+        if outdoor_temp is not None:
+            self._outdoor_temp_samples.append((now, outdoor_temp))
+        while self._outdoor_temp_samples and self._outdoor_temp_samples[0][0] < outdoor_cutoff:
+            self._outdoor_temp_samples.popleft()
 
         avg_comp = (
             sum(v for _, v in self._compressor_samples) / len(self._compressor_samples)
@@ -822,7 +843,14 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
             max(v for _, v in self._indoor_temp_samples)
             if self._indoor_temp_samples else None
         )
-        return avg_comp, heat_frac, indoor_max
+        # Cold-start bootstrap: if the buffer is empty (HA just restarted)
+        # fall back to the current reading so summer mode doesn't have to
+        # wait 6 h for samples to accumulate.
+        outdoor_max = (
+            max(v for _, v in self._outdoor_temp_samples)
+            if self._outdoor_temp_samples else outdoor_temp
+        )
+        return avg_comp, heat_frac, indoor_max, outdoor_max
 
     # ------------------------------------------------------------------
     # Write-back
