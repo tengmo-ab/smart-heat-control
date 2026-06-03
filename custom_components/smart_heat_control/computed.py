@@ -40,6 +40,7 @@ from .const import (
     MIN_HEAT_CURVE,
     NOT_USING_ADDITION_GRACE_SECONDS,
     QUARTERS_PER_DAY,
+    SUMMER_INDOOR_FLOOR_DELTA_C,
     SUMMER_OUTDOOR_C,
     SUMMER_TODAY_HIGH_C,
     SUMMER_TOMORROW_HIGH_C,
@@ -657,15 +658,19 @@ def _is_summer_coast_active(
 
     - today's forecast high >= SUMMER_TODAY_HIGH_C
     - tomorrow's forecast high >= SUMMER_TOMORROW_HIGH_C
-    - outdoor_recent_max (rolling 6h max) >= SUMMER_OUTDOOR_C
-    - current indoor >= default - 0.5 (safety net: don't coast if cold inside)
+    - outdoor_recent_max (rolling 6 h max) >= SUMMER_OUTDOOR_C
+    - current indoor >= default - SUMMER_INDOOR_FLOOR_DELTA_C
+      (safety net: bail out only if the house is *clearly* drifting cold)
     - not winter (winter heat always wins)
 
     Uses the 6 h rolling outdoor *max* rather than the instantaneous outdoor
     reading so a single 9-10 °C dawn doesn't flip the gate off-then-on the
     moment outdoor drops below SUMMER_OUTDOOR_C. As long as the previous
     afternoon was clearly mild, summer mode rides through the coldest part
-    of the night.
+    of the night. The indoor floor uses the same logic on the indoor side
+    — a 1 °C band (SUMMER_INDOOR_FLOOR_DELTA_C) means a routine pre-dawn
+    20.4 °C dip doesn't flap us out for two hours just to rejoin at
+    sunrise; only a sustained drift below 20.0 °C (with default 21) does.
 
     When True the gate function returns True immediately, bypassing v1's
     time and price gates so a sunny midday with cheap electricity doesn't
@@ -679,7 +684,10 @@ def _is_summer_coast_active(
         return False
     if outdoor_recent_max is None or outdoor_recent_max < SUMMER_OUTDOOR_C:
         return False
-    if indoor_temp is not None and indoor_temp < default_indoor_temp - 0.5:
+    if (
+        indoor_temp is not None
+        and indoor_temp < default_indoor_temp - SUMMER_INDOOR_FLOOR_DELTA_C
+    ):
         return False
     return True
 

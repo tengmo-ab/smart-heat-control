@@ -115,6 +115,13 @@ SUMMER_OUTDOOR_C = 12.0        # °C — outdoor "recently warm" check
 # morning. The window has to be long enough to cover an overnight low but
 # short enough to react to a genuine multi-day cold spell. 6 h hits both.
 SUMMER_OUTDOOR_MAX_WINDOW_HOURS = 6
+# How many °C below `default_indoor_temp` the indoor reading is allowed to
+# drift before summer mode considers the house "too cold" and bails out.
+# Wider band = more hysteresis = less flapping when indoor briefly dips
+# overnight. 1.0 °C (so default 21 → 20.0 °C floor) matches the user's
+# requested minimum hysteresis: a typical insulated house drifts down 0.5–
+# 1.0 °C over a cool night and the coming day will refill it via solar.
+SUMMER_INDOOR_FLOOR_DELTA_C = 1.0
 
 # Anti-overheat override thresholds for Weather Anticipation.
 # When indoor_max_recent_temp >= default + WEATHER_OVERRIDE_INDOOR_DELTA_C
