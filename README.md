@@ -145,7 +145,7 @@ The logic is a 1:1 port of a proven YAML automation that ran for two years on a 
 ## Supported systems
 
 Any heating system exposed as a `climate.*` entity in Home Assistant, including:
-- Comfortzone (RX95, etc.) via [ha-comfortzone](https://github.com/danbull21/ha-comfortzone)
+- Comfortzone (RX95, etc.) via [comfortzone](https://github.com/tengmo-ab/comfortzone) — the sibling integration I maintain that exposes the Comfortzone heat pump as native HA entities (climate, heat curve number, HW setpoint, pump activity status, etc.) — exactly the roles Smart Heat Control binds to in the config flow.
 - Nibe via [ha-nibe](https://github.com/elupus/hass_nibe)
 - IVT, Thermia, Mitsubishi, etc. via their respective integrations
 - District heating + separate hot water boiler
