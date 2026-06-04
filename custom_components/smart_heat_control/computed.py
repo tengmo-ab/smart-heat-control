@@ -358,7 +358,7 @@ def compute(inputs: Inputs, health: Health, tz_name: str) -> Computed:
         min_heat_curve=MIN_HEAT_CURVE,
     )
 
-    is_summer_coast = _is_summer_coast_active(
+    is_summer_mode = _is_summer_mode_active(
         is_winter=is_winter,
         future_highest_temp=future_highest_temp,
         tomorrow_highest_temp=tomorrow_highest_temp,
@@ -368,7 +368,7 @@ def compute(inputs: Inputs, health: Health, tz_name: str) -> Computed:
     )
 
     weather_active_cond = _compute_weather_active_conditions_met(
-        is_summer_coast=is_summer_coast,
+        is_summer_mode=is_summer_mode,
         has_pv_excess=inputs.has_pv_excess,
         is_bridge_active=inputs.is_bridge_active,
         wait_for_sun=wait_for_sun,
@@ -446,7 +446,7 @@ def compute(inputs: Inputs, health: Health, tz_name: str) -> Computed:
         weather_active_conditions_met=weather_active_cond,
         price_peak_conditions_met=price_peak_cond,
         cheap_price_conditions_met=cheap_price_cond,
-        is_summer_coast=is_summer_coast,
+        is_summer_mode=is_summer_mode,
     )
 
 
@@ -644,7 +644,7 @@ def _compute_weather_temp_logic(
     return term1 or term2 or term3
 
 
-def _is_summer_coast_active(
+def _is_summer_mode_active(
     *,
     is_winter: bool,
     future_highest_temp: float | None,
@@ -694,7 +694,7 @@ def _is_summer_coast_active(
 
 def _compute_weather_active_conditions_met(
     *,
-    is_summer_coast: bool,
+    is_summer_mode: bool,
     has_pv_excess: bool,
     is_bridge_active: bool,
     wait_for_sun: bool,
@@ -744,8 +744,8 @@ def _compute_weather_active_conditions_met(
     if not is_weather_enabled:
         return False
 
-    # FIX (v2): summer coast — computed upstream, see _is_summer_coast_active
-    if is_summer_coast:
+    # FIX (v2): summer mode — computed upstream, see _is_summer_mode_active
+    if is_summer_mode:
         return True
 
     # FIX (v2): anti-overheat — indoor already too warm + warm day → reduce

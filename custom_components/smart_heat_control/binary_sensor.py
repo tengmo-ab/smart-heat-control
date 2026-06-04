@@ -44,12 +44,12 @@ _BINARY_SENSORS: tuple[BinarySensorDef, ...] = (
         "mdi:solar-power-variant-outline",
     ),
     BinarySensorDef(
-        # Entity-id key kept as "is_summer_coast" so history graphs and any
-        # automations referencing binary_sensor.smart_heat_control_is_summer_coast
-        # keep working. Only the display label changes — "Summer Mode" reads
-        # better in the UI and matches the conventional name used by other
-        # heat-pump controllers (Comfortzone, etc.).
-        "is_summer_coast",
+        # Renamed 2026-06-03 from "is_summer_coast" → "is_summer_mode" to
+        # match the user-facing label. unique_id changes with the key, so
+        # HA will register this as a *new* entity (history before the
+        # rename is orphaned in the registry — clean up via Settings →
+        # Devices → Entities → search "summer coast" → delete).
+        "is_summer_mode",
         "Summer Mode Active",
         "mdi:weather-sunny",
         "mdi:weather-sunny-off",
@@ -109,8 +109,8 @@ class SmartHeatControlBinarySensor(
             return computed.is_evening_expensive
         if key == "wait_for_sun":
             return computed.wait_for_sun
-        if key == "is_summer_coast":
-            return computed.is_summer_coast
+        if key == "is_summer_mode":
+            return computed.is_summer_mode
         return None
 
     @property

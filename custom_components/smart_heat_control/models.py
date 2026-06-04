@@ -277,7 +277,7 @@ class Computed:
     # True when summer-coast override is active (climate-only — HW unchanged).
     # When True, weather_active_conditions_met is also True, but separating the
     # signal lets users see *why* Weather Anticipation triggered.
-    is_summer_coast: bool
+    is_summer_mode: bool
 
 
 # ---------------------------------------------------------------------------
