@@ -97,30 +97,58 @@ CONTROL_INTERVAL_SECONDS = 300
 # som finns för att den underliggande integrationen inte ska tappa skrivningar.
 WRITE_SETTLE_DELAY_SECONDS = 5
 
-# Summer coast — climate-only "no heating needed" override modelled on the
-# Comfortzone built-in summer mode. When today's high, tomorrow's high, and
-# the current outdoor all signal warm conditions, Weather Anticipation
-# Reduction is triggered regardless of hour or price. Lets the building
-# coast on solar + ambient warmth instead of paying for heat that the
-# afternoon sun will overshoot anyway. Indoor floor (default - 0.5 °C)
-# is a safety net so an unexpected cold morning still gets heat. The
-# *hot-water* cascade is unaffected — only the climate branch is gated here.
+# Summer mode — climate-only "no heating needed" override modelled on the
+# Comfortzone built-in summer mode, but driven by a *regime* signal rather
+# than a spot reading.
+#
+# WHY A REGIME SIGNAL (fixed 2026-09-18):
+# The first implementation gated on a rolling 6 h outdoor max against a fixed
+# 12 °C threshold. That works from June to August, when the overnight low
+# stays above the threshold. In the shoulder season the diurnal swing is
+# 9-11 K, so the same signal crosses the threshold *twice every day*: summer
+# mode dropped out in the small hours and came back mid-morning, every night,
+# for weeks. A detector whose input has a daily cycle cannot describe a
+# season no matter how much hysteresis is layered on top.
+#
+# The replacement uses the forecast daily MEAN — (high + low) / 2 — weighted
+# across today and tomorrow. The mean has no daily cycle, and it carries the
+# season by construction: a 17/7 September day means 12 °C while a 20/13 June
+# day means 16.5 °C, even though both "feel" like a 17-20 °C afternoon. No
+# calendar date and no user-tunable number is involved.
+SUMMER_REGIME_TODAY_WEIGHT = 0.6   # today vs tomorrow in the weighted mean
+
+# Schmitt trigger. The exit threshold is a fixed comfort floor: below this
+# daily mean the building wants base heat whatever the afternoon peak looks
+# like. The entry threshold sits a band above it, so leaving summer mode is
+# easy and re-entering requires a genuinely summer-like regime.
+SUMMER_REGIME_EXIT_C = 12.5
+
+# The band is *dynamic*: it scales with the forecast diurnal swing, which is
+# precisely the quantity that made the old detector noisy. A tight midsummer
+# swing (6-8 K) gives a ~2 K band; a 10-11 K shoulder-season swing gives the
+# full 3 K, which is what keeps a mild October afternoon from re-arming the
+# gate. Unknown swing → widest band (hardest to enter = safest).
+SUMMER_REGIME_BAND_FACTOR = 0.3
+SUMMER_REGIME_BAND_MIN_C = 1.0
+SUMMER_REGIME_BAND_MAX_C = 3.0
+
+# Entry-only sanity checks. These never force an *exit* — an exit driven by
+# a daily-cycle signal is exactly the bug above. They exist so a single warm
+# forecast day, or a forecast that disagrees with reality, cannot arm the
+# gate on its own.
 SUMMER_TODAY_HIGH_C = 15.0     # °C — today's daily high (SMHI shade-measured;
                                # in sun it feels ~3-5 °C warmer)
 SUMMER_TOMORROW_HIGH_C = 13.0  # °C — tomorrow's daily high (don't coast if a cold day follows)
-SUMMER_OUTDOOR_C = 12.0        # °C — outdoor "recently warm" check
-# Use a rolling 6h max of outdoor temp instead of the instantaneous reading
-# so a single cool morning (typical 9-10 °C around 04:00 even in proper
-# summer) doesn't bounce us out of summer mode at sunrise and back in mid-
-# morning. The window has to be long enough to cover an overnight low but
-# short enough to react to a genuine multi-day cold spell. 6 h hits both.
+SUMMER_OUTDOOR_C = 12.0        # °C — measured outdoor "recently warm" confirmation
+# Rolling window for the measured-outdoor confirmation. Kept at 6 h: as an
+# entry-only check it just answers "has it actually been mild today", and a
+# longer window would let yesterday's warmth arm the gate on a cold morning.
 SUMMER_OUTDOOR_MAX_WINDOW_HOURS = 6
 # How many °C below `default_indoor_temp` the indoor reading is allowed to
-# drift before summer mode considers the house "too cold" and bails out.
-# Wider band = more hysteresis = less flapping when indoor briefly dips
-# overnight. 1.0 °C (so default 21 → 20.0 °C floor) matches the user's
-# requested minimum hysteresis: a typical insulated house drifts down 0.5–
-# 1.0 °C over a cool night and the coming day will refill it via solar.
+# drift before summer mode bails out. This is the one check that acts
+# immediately in both directions — comfort always wins over the regime.
+# 1.0 °C (so default 21 → 20.0 °C floor) is wide enough that a routine
+# pre-dawn dip doesn't trigger it.
 SUMMER_INDOOR_FLOOR_DELTA_C = 1.0
 
 # Anti-overheat override thresholds for Weather Anticipation.

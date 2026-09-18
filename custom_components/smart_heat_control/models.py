@@ -168,6 +168,14 @@ class Inputs:
     # --- HW reduction state (integration-owned binary_sensor) -----------
     hw_reduction_active: bool = False
 
+    # --- Summer-mode state (fed back from the previous cycle) -----------
+    # Last cycle's Computed.is_summer_mode. The summer gate is a Schmitt
+    # trigger, so it needs to know which side of the band it is currently on;
+    # it also holds this value when the forecast is momentarily unavailable
+    # instead of flipping to off. False on a cold start = base heat until the
+    # warm regime is positively re-established.
+    summer_mode_was_active: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Health — categorical "what can we still do?" view of upstream availability
@@ -279,10 +287,18 @@ class Computed:
     price_peak_conditions_met: bool
     cheap_price_conditions_met: bool
     # --- v2 overrides surfaced for diagnostics ---
-    # True when summer-coast override is active (climate-only — HW unchanged).
-    # When True, weather_active_conditions_met is also True, but separating the
-    # signal lets users see *why* Weather Anticipation triggered.
+    # True when the summer-mode override is active (climate-only — HW
+    # unchanged). When True, weather_active_conditions_met is also True, but
+    # separating the signal lets users see *why* Weather Anticipation
+    # triggered.
     is_summer_mode: bool
+    # Summer-mode regime detector internals, surfaced as binary-sensor
+    # attributes so the Schmitt trigger is inspectable from the UI:
+    # weighted forecast daily mean, and the two thresholds it is compared
+    # against. summer_regime_temp is None when the forecast is unavailable.
+    summer_regime_temp: float | None
+    summer_regime_enter_c: float
+    summer_regime_exit_c: float
 
 
 # ---------------------------------------------------------------------------

@@ -116,16 +116,30 @@ class SmartHeatControlBinarySensor(
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
-        """Explain *why* summer mode is off — weather or the user.
+        """Explain *why* summer mode is on or off.
 
-        Without this the sensor is ambiguous: 'off' could mean the weather
-        thresholds aren't met, or that the Summer Mode switch is off. The
-        attribute makes the manual override visible in the UI and usable as
-        an automation condition.
+        Without this the sensor is ambiguous: 'off' could mean the user
+        switched it off, or that the weather regime is below threshold. The
+        regime temperature and the two Schmitt thresholds make the decision
+        inspectable from the UI (and usable as automation conditions) —
+        ``regime_temp_c`` between ``exit_below_c`` and ``enter_above_c`` is
+        the hold band, where the state deliberately does not change.
         """
         if self._defn.key != "is_summer_mode":
             return None
-        return {"manually_disabled": not self.coordinator.summer_mode_enabled}
+        attrs: dict[str, Any] = {
+            "manually_disabled": not self.coordinator.summer_mode_enabled,
+        }
+        computed = getattr(self.coordinator, "_last_computed", None)
+        if computed is not None:
+            attrs["regime_temp_c"] = (
+                round(computed.summer_regime_temp, 1)
+                if computed.summer_regime_temp is not None
+                else None
+            )
+            attrs["enter_above_c"] = round(computed.summer_regime_enter_c, 1)
+            attrs["exit_below_c"] = round(computed.summer_regime_exit_c, 1)
+        return attrs
 
     @property
     def icon(self) -> str:

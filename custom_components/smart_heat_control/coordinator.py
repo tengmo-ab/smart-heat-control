@@ -330,9 +330,9 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         self._heating_samples: deque[tuple[datetime, bool]] = deque()
         self._indoor_temp_samples: deque[tuple[datetime, float]] = deque()
         # Longer-window buffer for outdoor temp — see
-        # SUMMER_OUTDOOR_MAX_WINDOW_HOURS. Used so summer mode doesn't
-        # bounce out for the few hours around dawn when outdoor briefly
-        # dips below SUMMER_OUTDOOR_C.
+        # SUMMER_OUTDOOR_MAX_WINDOW_HOURS. Feeds summer mode's entry-only
+        # "has it actually been mild today" confirmation; the regime itself
+        # comes from the forecast daily mean, not from this buffer.
         self._outdoor_temp_samples: deque[tuple[datetime, float]] = deque()
 
         # Anti-flap hysteresis state.
@@ -627,7 +627,7 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         self._update_hw_reduction(pump, now)
 
         # Rolling buffers → avg_compressor, heating_fraction, indoor_max,
-        # outdoor_max (6 h window for summer-mode stability)
+        # outdoor_max (6 h window, summer-mode entry confirmation)
         avg_comp, heat_frac, indoor_max, outdoor_max = self._update_rolling_buffers(
             comp_w, pump, indoor_temp, outdoor_temp, now
         )
@@ -708,6 +708,11 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
             last_legionella_run=self.last_legionella_run,
             legionella_boost_end=self._legionella_boost_end,
             hw_reduction_active=self._hw_reduction_active,
+            summer_mode_was_active=(
+                self._last_computed.is_summer_mode
+                if self._last_computed is not None
+                else False
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -808,9 +813,9 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         """Maintain rolling buffers; return (avg_comp, heat_frac, indoor_max, outdoor_max).
 
         Compressor / heating / indoor use a 60-min window. Outdoor uses the
-        wider SUMMER_OUTDOOR_MAX_WINDOW_HOURS window because the only
-        consumer (summer mode) wants to know "was it warm at some point in
-        the last several hours" rather than "is it warm right now".
+        wider SUMMER_OUTDOOR_MAX_WINDOW_HOURS window because its only
+        consumer (summer mode's entry check) wants to know "was it warm at
+        some point today" rather than "is it warm right now".
         """
         short_cutoff = now - timedelta(hours=1)
         outdoor_cutoff = now - timedelta(hours=SUMMER_OUTDOOR_MAX_WINDOW_HOURS)

@@ -42,6 +42,11 @@ from .const import (
     QUARTERS_PER_DAY,
     SUMMER_INDOOR_FLOOR_DELTA_C,
     SUMMER_OUTDOOR_C,
+    SUMMER_REGIME_BAND_FACTOR,
+    SUMMER_REGIME_BAND_MAX_C,
+    SUMMER_REGIME_BAND_MIN_C,
+    SUMMER_REGIME_EXIT_C,
+    SUMMER_REGIME_TODAY_WEIGHT,
     SUMMER_TODAY_HIGH_C,
     SUMMER_TOMORROW_HIGH_C,
     VERY_CHEAP_VS_RECENT_RATIO,
@@ -358,10 +363,25 @@ def compute(inputs: Inputs, health: Health, tz_name: str) -> Computed:
         min_heat_curve=MIN_HEAT_CURVE,
     )
 
+    # Summer-mode regime signal. Deliberately uses the *calendar* today/
+    # tomorrow indices rather than future_idx: future_idx flips to tomorrow at
+    # FUTURE_TEMP_TOMORROW_THRESHOLD_HOUR, which would step the gate's inputs
+    # once a day at 16:00 — another daily-cycle artefact of exactly the kind
+    # this detector exists to avoid.
+    summer_regime_temp, summer_diurnal_swing = _summer_regime_signal(
+        forecast, today_idx
+    )
+    summer_regime_enter_c = SUMMER_REGIME_EXIT_C + _summer_regime_band(
+        summer_diurnal_swing
+    )
+
     is_summer_mode = _is_summer_mode_active(
         is_enabled=inputs.summer_mode_enabled,
+        was_active=inputs.summer_mode_was_active,
         is_winter=is_winter,
-        future_highest_temp=future_highest_temp,
+        regime_temp=summer_regime_temp,
+        regime_enter_c=summer_regime_enter_c,
+        today_highest_temp=_forecast_high(forecast, today_idx),
         tomorrow_highest_temp=tomorrow_highest_temp,
         outdoor_recent_max=inputs.outdoor_max_recent_temp,
         indoor_temp=inputs.indoor_temp,
@@ -448,6 +468,9 @@ def compute(inputs: Inputs, health: Health, tz_name: str) -> Computed:
         price_peak_conditions_met=price_peak_cond,
         cheap_price_conditions_met=cheap_price_cond,
         is_summer_mode=is_summer_mode,
+        summer_regime_temp=summer_regime_temp,
+        summer_regime_enter_c=summer_regime_enter_c,
+        summer_regime_exit_c=SUMMER_REGIME_EXIT_C,
     )
 
 
@@ -645,61 +668,132 @@ def _compute_weather_temp_logic(
     return term1 or term2 or term3
 
 
+def _summer_regime_signal(
+    forecast: tuple[ForecastDay, ...],
+    today_idx: int,
+) -> tuple[float | None, float | None]:
+    """Return ``(weighted daily mean, today's diurnal swing)`` in °C.
+
+    The daily mean ``(high + low) / 2`` is the season-carrying quantity: it
+    has no daily cycle, so it cannot produce the twice-a-day threshold
+    crossings that a spot reading or a short rolling max produces in the
+    shoulder season. Today and tomorrow are blended (``SUMMER_REGIME_TODAY_
+    WEIGHT``) so one warm day in a cool week cannot arm the gate and one cool
+    day in a warm week cannot drop it.
+
+    Returns ``(None, None)`` when today's forecast is incomplete — the caller
+    treats that as "signal unavailable" and holds the previous state rather
+    than defaulting to off, so a weather entity that reloads (or an HA
+    restart) doesn't produce a spurious transition.
+    """
+    today_high = _forecast_high(forecast, today_idx)
+    today_low = _forecast_low(forecast, today_idx)
+    if today_high is None or today_low is None:
+        return None, None
+
+    today_mean = (today_high + today_low) / 2.0
+    swing = today_high - today_low
+
+    tomorrow_high = _forecast_high(forecast, today_idx + 1)
+    tomorrow_low = _forecast_low(forecast, today_idx + 1)
+    if tomorrow_high is None or tomorrow_low is None:
+        # Short forecast — today alone still beats a spot reading.
+        return today_mean, swing
+
+    tomorrow_mean = (tomorrow_high + tomorrow_low) / 2.0
+    w = SUMMER_REGIME_TODAY_WEIGHT
+    return w * today_mean + (1.0 - w) * tomorrow_mean, swing
+
+
+def _summer_regime_band(diurnal_swing: float | None) -> float:
+    """Width of the Schmitt band above ``SUMMER_REGIME_EXIT_C``, in °C.
+
+    Scaled by the forecast diurnal swing — the quantity that decides how
+    noisy the day is. Midsummer swings of 6-8 K give a ~2 K band; the 10-11 K
+    swings of a Swedish September give the full 3 K, so a mild autumn
+    afternoon cannot re-arm a gate the cold nights just released. An unknown
+    swing yields the widest band, i.e. the hardest to enter.
+    """
+    if diurnal_swing is None:
+        return SUMMER_REGIME_BAND_MAX_C
+    return min(
+        max(diurnal_swing * SUMMER_REGIME_BAND_FACTOR, SUMMER_REGIME_BAND_MIN_C),
+        SUMMER_REGIME_BAND_MAX_C,
+    )
+
+
 def _is_summer_mode_active(
     *,
     is_enabled: bool,
+    was_active: bool,
     is_winter: bool,
-    future_highest_temp: float | None,
+    regime_temp: float | None,
+    regime_enter_c: float,
+    today_highest_temp: float | None,
     tomorrow_highest_temp: float | None,
     outdoor_recent_max: float | None,
     indoor_temp: float | None,
     default_indoor_temp: float,
 ) -> bool:
-    """Climate-only "no heating needed" override modeled on the Comfortzone
-    built-in summer mode. Returns True when *all* of:
+    """Climate-only "no heating needed" override, as a regime detector.
 
-    - the user-facing Summer Mode switch is on
-    - today's forecast high >= SUMMER_TODAY_HIGH_C
-    - tomorrow's forecast high >= SUMMER_TOMORROW_HIGH_C
-    - outdoor_recent_max (rolling 6 h max) >= SUMMER_OUTDOOR_C
-    - current indoor >= default - SUMMER_INDOOR_FLOOR_DELTA_C
-      (safety net: bail out only if the house is *clearly* drifting cold)
-    - not winter (winter heat always wins)
+    Three tiers, in priority order:
 
-    Uses the 6 h rolling outdoor *max* rather than the instantaneous outdoor
-    reading so a single 9-10 °C dawn doesn't flip the gate off-then-on the
-    moment outdoor drops below SUMMER_OUTDOOR_C. As long as the previous
-    afternoon was clearly mild, summer mode rides through the coldest part
-    of the night. The indoor floor uses the same logic on the indoor side
-    — a 1 °C band (SUMMER_INDOOR_FLOOR_DELTA_C) means a routine pre-dawn
-    20.4 °C dip doesn't flap us out for two hours just to rejoin at
-    sunrise; only a sustained drift below 20.0 °C (with default 21) does.
+    1. **Hard gates** (``is_enabled``, ``is_winter``, the indoor floor) decide
+       immediately in both directions. Comfort and user intent outrank the
+       regime: if the house is genuinely drifting cold we leave on the spot,
+       whatever the forecast says.
+    2. **Hysteresis** on the regime temperature — a Schmitt trigger. Entry
+       needs ``regime_temp >= regime_enter_c`` (exit threshold + a band that
+       scales with the diurnal swing); once inside, we only leave when the
+       regime drops below ``SUMMER_REGIME_EXIT_C``. Between the two we hold,
+       so forecast jitter and the daily forecast-index roll cannot toggle us.
+    3. **Entry-only confirmations** — today's and tomorrow's highs, the
+       measured 6 h outdoor max, and a valid indoor reading. These make
+       *arming* the gate conservative without ever forcing an exit; an exit
+       driven by a signal with a daily cycle is the original bug.
+
+    ``was_active`` is last cycle's value (``Computed.is_summer_mode``), so a
+    missing forecast holds the current state instead of flipping to off. On a
+    cold start it is False, which means the house gets base heat until the
+    regime is positively re-established — the safe direction.
 
     When True the gate function returns True immediately, bypassing v1's
     time and price gates so a sunny midday with cheap electricity doesn't
     fall through to Cheap Price Intensify. *Hot-water* cascade is untouched.
-
-    ``is_enabled`` is the manual escape hatch (switch.*_summer_mode). The
-    thresholds above are deliberately tuned for the summer half-year, so in
-    the shoulder season a mild autumn day can satisfy all of them while the
-    building — with a low sun, long nights and a cold ground — still wants
-    base heat. Turning the switch off hands the climate branch back to the
-    normal cascade without touching any other feature.
     """
+    # --- Tier 1: hard gates, both directions -------------------------------
     if not is_enabled:
         return False
     if is_winter:
         return False
-    if future_highest_temp is None or future_highest_temp < SUMMER_TODAY_HIGH_C:
+    house_is_cold = (
+        indoor_temp is not None
+        and indoor_temp < default_indoor_temp - SUMMER_INDOOR_FLOOR_DELTA_C
+    )
+    if house_is_cold:
+        return False
+
+    # --- Tier 2: hysteresis on the regime signal ---------------------------
+    if regime_temp is None:
+        # Forecast unavailable (restart, weather entity reloading). Hold.
+        return was_active
+    if was_active:
+        return regime_temp >= SUMMER_REGIME_EXIT_C
+    if regime_temp < regime_enter_c:
+        return False
+
+    # --- Tier 3: entry-only confirmations ----------------------------------
+    if today_highest_temp is None or today_highest_temp < SUMMER_TODAY_HIGH_C:
         return False
     if tomorrow_highest_temp is None or tomorrow_highest_temp < SUMMER_TOMORROW_HIGH_C:
         return False
     if outdoor_recent_max is None or outdoor_recent_max < SUMMER_OUTDOOR_C:
         return False
-    if (
-        indoor_temp is not None
-        and indoor_temp < default_indoor_temp - SUMMER_INDOOR_FLOOR_DELTA_C
-    ):
+    # Entering blind is not allowed: the indoor floor is the safety net, so we
+    # need a real reading to lean on it. (Staying in, above, tolerates a brief
+    # dropout — losing the sensor for one cycle shouldn't restart the cascade.)
+    if indoor_temp is None:
         return False
     return True
 
@@ -739,11 +833,11 @@ def _compute_weather_active_conditions_met(
     Two v2-only overrides bypass the time, temp-condition, and price gates
     when conditions clearly say "no heating needed":
 
-    FIX (v2) summer coast — today + tomorrow both forecast warm, outdoor
-    already mild, indoor not unexpectedly low. Models Comfortzone's built-in
-    summer mode but uses richer data: prevents climate boost on a warm sunny
-    day regardless of how cheap electricity happens to be. *HW logic is
-    untouched.*
+    FIX (v2) summer mode — the weather regime (forecast daily mean, see
+    _is_summer_mode_active) says the building needs no purchased heat.
+    Models Comfortzone's built-in summer mode but uses richer data: prevents
+    climate boost on a warm day regardless of how cheap electricity happens
+    to be. *HW logic is untouched.*
 
     FIX (v2) anti-overheat — indoor measurably above default + today will
     warm further. Stops pre-heating an already-overheated house even when
