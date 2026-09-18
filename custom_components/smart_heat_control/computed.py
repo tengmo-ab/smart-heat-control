@@ -359,6 +359,7 @@ def compute(inputs: Inputs, health: Health, tz_name: str) -> Computed:
     )
 
     is_summer_mode = _is_summer_mode_active(
+        is_enabled=inputs.summer_mode_enabled,
         is_winter=is_winter,
         future_highest_temp=future_highest_temp,
         tomorrow_highest_temp=tomorrow_highest_temp,
@@ -646,6 +647,7 @@ def _compute_weather_temp_logic(
 
 def _is_summer_mode_active(
     *,
+    is_enabled: bool,
     is_winter: bool,
     future_highest_temp: float | None,
     tomorrow_highest_temp: float | None,
@@ -656,6 +658,7 @@ def _is_summer_mode_active(
     """Climate-only "no heating needed" override modeled on the Comfortzone
     built-in summer mode. Returns True when *all* of:
 
+    - the user-facing Summer Mode switch is on
     - today's forecast high >= SUMMER_TODAY_HIGH_C
     - tomorrow's forecast high >= SUMMER_TOMORROW_HIGH_C
     - outdoor_recent_max (rolling 6 h max) >= SUMMER_OUTDOOR_C
@@ -675,7 +678,16 @@ def _is_summer_mode_active(
     When True the gate function returns True immediately, bypassing v1's
     time and price gates so a sunny midday with cheap electricity doesn't
     fall through to Cheap Price Intensify. *Hot-water* cascade is untouched.
+
+    ``is_enabled`` is the manual escape hatch (switch.*_summer_mode). The
+    thresholds above are deliberately tuned for the summer half-year, so in
+    the shoulder season a mild autumn day can satisfy all of them while the
+    building — with a low sun, long nights and a cold ground — still wants
+    base heat. Turning the switch off hands the climate branch back to the
+    normal cascade without touching any other feature.
     """
+    if not is_enabled:
+        return False
     if is_winter:
         return False
     if future_highest_temp is None or future_highest_temp < SUMMER_TODAY_HIGH_C:

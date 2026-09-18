@@ -275,6 +275,7 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         self.cheap_price_enabled: bool = True
         self.price_peak_enabled: bool = True
         self.weather_anticipation_enabled: bool = True
+        self.summer_mode_enabled: bool = True
         self.legionella_boost_enabled: bool = False
         self.survive_solar_enabled: bool = False
 
@@ -475,6 +476,7 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
             "cheap_price": inputs.cheap_price_enabled,
             "price_peak": inputs.price_peak_enabled,
             "weather": inputs.weather_anticipation_enabled,
+            "summer_mode": inputs.summer_mode_enabled,
             "legionella": inputs.legionella_boost_enabled,
             "survive_solar": inputs.survive_solar_enabled,
             "hw_extra": bool(inputs.hot_water_extra_on),
@@ -692,6 +694,7 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
             cheap_price_enabled=self.cheap_price_enabled,
             price_peak_enabled=self.price_peak_enabled,
             weather_anticipation_enabled=self.weather_anticipation_enabled,
+            summer_mode_enabled=self.summer_mode_enabled,
             legionella_boost_enabled=self.legionella_boost_enabled,
             survive_solar_enabled=self.survive_solar_enabled,
             default_indoor_temp=self.default_indoor_temp,

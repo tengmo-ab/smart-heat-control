@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.binary_sensor import BinarySensorEntity
 from homeassistant.config_entries import ConfigEntry
@@ -112,6 +113,19 @@ class SmartHeatControlBinarySensor(
         if key == "is_summer_mode":
             return computed.is_summer_mode
         return None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Explain *why* summer mode is off — weather or the user.
+
+        Without this the sensor is ambiguous: 'off' could mean the weather
+        thresholds aren't met, or that the Summer Mode switch is off. The
+        attribute makes the manual override visible in the UI and usable as
+        an automation condition.
+        """
+        if self._defn.key != "is_summer_mode":
+            return None
+        return {"manually_disabled": not self.coordinator.summer_mode_enabled}
 
     @property
     def icon(self) -> str:

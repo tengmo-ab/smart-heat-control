@@ -35,6 +35,10 @@ _SWITCHES: tuple[SwitchDef, ...] = (
         True,
         "mdi:weather-sunny-off",
     ),
+    # Summer coast gate. Default on = previous behaviour. Turn it off to get
+    # base heat back on a shoulder-season day that technically passes every
+    # summer threshold; the rest of the cascade keeps running untouched.
+    SwitchDef("summer_mode_enabled", "Summer Mode", True, "mdi:weather-sunny"),
     SwitchDef("legionella_boost_enabled", "Legionella Boost", False, "mdi:bacteria"),
     SwitchDef("survive_solar_enabled", "Survive on Solar", False, "mdi:solar-power"),
 )

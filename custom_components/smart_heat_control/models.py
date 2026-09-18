@@ -143,6 +143,11 @@ class Inputs:
     cheap_price_enabled: bool = True
     price_peak_enabled: bool = True
     weather_anticipation_enabled: bool = True
+    # Master gate for the summer-coast override. Off = the summer gate never
+    # fires and the normal cascade decides the climate branch again. Meant for
+    # the shoulder season (autumn/spring), where a day can pass every summer
+    # threshold and the house still wants a bit of base heat.
+    summer_mode_enabled: bool = True
     legionella_boost_enabled: bool = False
     survive_solar_enabled: bool = False
 
