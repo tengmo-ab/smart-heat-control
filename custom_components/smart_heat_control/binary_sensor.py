@@ -55,6 +55,12 @@ _BINARY_SENSORS: tuple[BinarySensorDef, ...] = (
         "mdi:weather-sunny",
         "mdi:weather-sunny-off",
     ),
+    BinarySensorDef(
+        "hw_aux_guard_active",
+        "HW Aux Guard Active",
+        "mdi:shield-check",
+        "mdi:shield-outline",
+    ),
 )
 
 
@@ -101,6 +107,8 @@ class SmartHeatControlBinarySensor(
 
         if key == "hw_reduction_active":
             return self.coordinator._hw_reduction_active
+        if key == "hw_aux_guard_active":
+            return self.coordinator._hw_aux_guard_caps.any
 
         computed = getattr(self.coordinator, "_last_computed", None)
         if computed is None:
@@ -125,6 +133,8 @@ class SmartHeatControlBinarySensor(
         ``regime_temp_c`` between ``exit_below_c`` and ``enter_above_c`` is
         the hold band, where the state deliberately does not change.
         """
+        if self._defn.key == "hw_aux_guard_active":
+            return self._hw_aux_guard_attributes()
         if self._defn.key != "is_summer_mode":
             return None
         attrs: dict[str, Any] = {
@@ -140,6 +150,27 @@ class SmartHeatControlBinarySensor(
             attrs["enter_above_c"] = round(computed.summer_regime_enter_c, 1)
             attrs["exit_below_c"] = round(computed.summer_regime_exit_c, 1)
         return attrs
+
+    def _hw_aux_guard_attributes(self) -> dict[str, Any]:
+        """Show which cap is on and why, so any session is explainable after
+        the fact — including one that never armed or let go early."""
+        coord = self.coordinator
+        guard = coord._hw_aux_guard
+        caps = coord._hw_aux_guard_caps
+
+        def _iso(value: Any) -> str | None:
+            return value.isoformat() if value is not None else None
+
+        return {
+            "enabled": coord.hw_aux_guard_enabled,
+            "outdoor_threshold_c": int(coord.hw_aux_guard_outdoor_threshold),
+            "heating_demand_lowered": caps.climate,
+            "hot_water_setpoint_lowered": caps.hot_water,
+            "hw_session_started": _iso(guard.session_start),
+            "hw_setpoint_hold_until": _iso(guard.hw_hold_until),
+            "elpatron_last_on": _iso(guard.aux_last_on),
+            "last_release_reason": guard.last_release_reason,
+        }
 
     @property
     def icon(self) -> str:

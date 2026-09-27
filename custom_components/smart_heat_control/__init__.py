@@ -87,6 +87,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # the user can fix the upstream entity without re-adding the integration.
         # We still want the platforms loaded so users see the switches/numbers.
 
+    # Only after the first refresh: an edge arriving before it would run a
+    # cycle against state the restored entities haven't finished seeding.
+    coordinator.async_start_guard_listeners()
+
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     _LOGGER.info(
         "Smart Heat Control: setup complete for entry %s (%d roles configured)",

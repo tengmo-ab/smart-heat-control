@@ -63,6 +63,18 @@ Logiken kommer från en YAML-automation som körts dagligen i 2 år på en Comfo
 9. **Entry är strängt, exit är snabbt.** Dagens och morgondagens högsta, uppmätt 6 h utomhus-max och en giltig inomhusavläsning är **entry-only**-kontroller — de kan aldrig tvinga fram en *exit*, eftersom en exit driven av en signal med dygnscykel är just buggen ovan. Tre saker verkar omedelbart åt båda håll: vinter, Summer Mode-switchen, och inomhusgolvet (`default - 1.0°C`). Komfort och användarintention slår alltid regimen. Saknas prognosen (omstart, väderentitet som laddar om) hålls föregående tillstånd i stället för att falla till `off` — vid kallstart är utgångsläget `off`, dvs huset får grundvärme tills den varma regimen är positivt bekräftad.
 
 10. **Manuell override av summer mode.** `switch.<enhetsnamn>_summer_mode` (på som default) stänger av *enbart* summer-gaten; resten av kaskaden löper vidare oförändrad. Binärsensorn exponerar `manually_disabled` så du ser om `off` beror på vädret eller på dig. Toggeln räknas som user-action och bypassar anti-flap-cooldown — beslutet räknas om vid nästa cykel, inte om 20 minuter.
+11. **HW Aux Guard — håll elpatronen borta från varmvatten när det är kallt.** Vid ≤ -5°C (med värmekurva 4.0 / inne 20-21°C) plockar en RX95 in elpatronen när den växlar till varmvatten, även med lägsta VV-prioritet: pumpen jäktar klart VV för att hinna tillbaka till ett värmebehov den upplever som akut. Guarden sänker det behovet medan VV-sessionen pågår, och gör sessionen kortare. Switch **HW Aux Guard** (av som default) + number **HW Aux Guard Outdoor Threshold** (heltal, default -5°C).
+
+   - **Armeras** när pumpen står i `Making Hot Water`, utomhus ≤ tröskeln, inne ≥ `default − 1.5°C`, och elpatronen (≥ 100 W) setts under sessionen eller inom 15 min före den (den kör då redan och följer med in i VV).
+   - **Värmebehov:** inne-mål och värmekurva sätts till `min(kaskad − 1, default − 1)`. Första termen gör att den biter även när kaskaden redan sänkt — en pump som tar in elpatronen vid −1.5 måste se −2.5 innan något händer. Andra termen gör att den biter när kaskaden *höjer* (Cheap Price 22°C / 6.0 skulle annars bara bli 21 / 5.0, fortfarande över default). Aldrig mer än 3 under default (21 → 18°C, 4.0 → 1.0), och aldrig högre än kaskaden själv valt. Räknas om från kaskaden varje cykel, så sänkningen ackumuleras aldrig.
+   - **Kortare VV-körningar:** VV-målet sätts på samma sätt till `min(kaskad − 5, default − 5)`, golv 40°C — samma värde som kaskaden själv skriver när elpatronen drar över 1 kW (v1-gren 7). Den grenen finns alltså redan, men reagerar på elpatronens *momentana* effekt: så fort den tystnar studsar VV-målet tillbaka till 45-50°C mitt i körningen. Guarden håller VV-målet nere hela sessionen **och 60 min efter** — att återställa fullt börvärde precis när pumpen nått det sänkta skulle få den att starta en ny VV-körning direkt, en stopp/start-loop orsakad av vårt eget tak.
+   - **Spärren håller hela sessionen.** Det är sänkningen som får elpatronen att slå av — släpper man när den tystnat återställs behovet och den kommer direkt tillbaka. Sessionen slutar omedelbart när pumpen går tillbaka till `Heating` (värmebehovet återställs då direkt); i andra lägen (`Idle` mellan kompressorcykler, `Defrosting`, sensor otillgänglig) först efter 10 min.
+   - **Komfortskydd på uppmätt temperatur, inte på börvärden:** faller inne under `default − 1.5°C` släpps värmesänkningen för resten av sessionen (ingen återarmering runt golvet), liksom efter max 90 min. VV-taket ligger kvar — att avsluta VV fortare är just vad ett kallt hus behöver.
+   - **Släpper allt direkt, inklusive efterhållningen,** om switchen eller Master slås av, om en legionella-boost är aktiv *eller startar i samma cykel*, eller om Extra VV är på. De två sista är VV-körningar där elpatronen *ska* gå — hög temperatur by design — och de kan vara långa. En Legionella Boost-VV-beslut rörs aldrig, även i cykeln som startar den.
+   - **Händelsestyrd:** utöver 5-minuterspollningen körs cykeln direkt på de få tillståndskanter spärren bryr sig om — pumpen går in i VV när det är kallt, elpatronen passerar 100 W uppåt under en oarmerad session, eller pumpen går VV → Heating medan värmesänkningen är på. Max en sådan cykel per 60 s; en kant inom fönstret slås ihop till en efterföljande cykel i stället för att tappas. Med spärren avslagen, eller när det är varmare än tröskeln, blir det inga extra cykler alls. Extra cykler lägger inte till sampel i de rullande medelvärdena (kompressoreffekt, uppvärmningsandel), och cykler kan inte längre överlappa varandra.
+   - Appliceras *efter* anti-flap-lagret: en hållen mode (blockerad uppgradering) spelar upp förra cykelns mål och skulle annars kunna maskera sänkningen i upp till 20 min.
+   - `binary_sensor.<enhetsnamn>_hw_aux_guard_active` visar `heating_demand_lowered`, `hot_water_setpoint_lowered`, `hw_session_started`, `hw_setpoint_hold_until`, `elpatron_last_on` och `last_release_reason`, så varje session går att förklara i efterhand.
+   - Kräver att `pump_activity_sensor` och `aux_power_sensor` är bundna (elpatronens effekt i W — för Comfortzone "Addition effect", inte "Estimated aux power consumption" som är fläkt + standby).
 
 ## Arkitektur
 
@@ -73,14 +85,15 @@ custom_components/smart_heat_control/
 ├── config_flow.py         ✅ 6-stegs config-flow (heating → power → pricing → weather → solar → defaults)
 ├── models.py              ✅ Inputs / Computed / Decision / Health-dataclasser
 ├── computed.py            ✅ Beräkningslager (1:1-port av v1 variables:-block)
-├── controller.py          ✅ Beslutskaskad (Weather → Price Peak → Cheap → Default + VV + legionella)
+├── controller.py          ✅ Beslutskaskad (Weather → Price Peak → Cheap → Default + VV + legionella) + HW aux guard-tak
+├── hw_aux_guard.py        ✅ VV-sessionsspärr som håller elpatronen borta från kall-VV
 ├── coordinator.py         ✅ DataUpdateCoordinator, _read_inputs, _apply, HW-reduktion SM
 ├── __init__.py            ✅ async_setup_entry / unload
-├── switch.py              ✅ master_enabled, cheap_price, price_peak, weather, summer_mode, legionella, solar
-├── number.py              ✅ default_indoor_temp, heat_curve, hw_temp, price_threshold, legionella
+├── switch.py              ✅ master_enabled, cheap_price, price_peak, weather, summer_mode, legionella, solar, hw_aux_guard
+├── number.py              ✅ default_indoor_temp, heat_curve, hw_temp, price_threshold, legionella, hw_aux_guard_outdoor_threshold
 ├── select.py              ✅ optimization_mode, hw_mode (read-only outputs)
 ├── sensor.py              ✅ AM/PM-snittpriser, future_highest_temp, days_since_legionella, m.fl.
-├── binary_sensor.py       ✅ hw_reduction_active, is_evening_expensive, wait_for_sun, is_summer_mode
+├── binary_sensor.py       ✅ hw_reduction_active, is_evening_expensive, wait_for_sun, is_summer_mode, hw_aux_guard_active
 ├── datetime.py            ✅ vacation_end, last_legionella_run
 └── strings.json           ✅ Config-flow UI-labels
 ```

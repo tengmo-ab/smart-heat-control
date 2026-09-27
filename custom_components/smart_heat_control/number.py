@@ -16,11 +16,13 @@ from .const import (
     CONF_DEFAULT_HEAT_CURVE,
     CONF_DEFAULT_HW_TEMP,
     CONF_DEFAULT_INDOOR_TEMP,
+    CONF_HW_AUX_GUARD_OUTDOOR_THRESHOLD,
     CONF_LEGIONELLA_DURATION_HOURS,
     CONF_LEGIONELLA_MAX_DAYS,
     CONF_LEGIONELLA_MIN_DAYS,
     CONF_PRICE_THRESHOLD,
     DEFAULT_HEAT_CURVE,
+    DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C,
     DEFAULT_HW_TEMP,
     DEFAULT_INDOOR_TEMP,
     DEFAULT_LEGIONELLA_DURATION_HOURS,
@@ -86,6 +88,12 @@ _NUMBERS: tuple[NumberDef, ...] = (
         "legionella_duration_hours", CONF_LEGIONELLA_DURATION_HOURS,
         "Legionella Boost Duration", DEFAULT_LEGIONELLA_DURATION_HOURS,
         1.0, 12.0, 1.0, "h", "mdi:timer",
+    ),
+    # Whole degrees: the guard arms when outdoor <= this value.
+    NumberDef(
+        "hw_aux_guard_outdoor_threshold", CONF_HW_AUX_GUARD_OUTDOOR_THRESHOLD,
+        "HW Aux Guard Outdoor Threshold", DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C,
+        -30.0, 10.0, 1.0, "°C", "mdi:snowflake-thermometer",
     ),
 )
 

@@ -11,7 +11,11 @@ from zoneinfo import ZoneInfo
 
 import homeassistant.util.dt as dt_util
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_state_change_event,
+)
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .computed import assess_health, compute
@@ -43,6 +47,7 @@ from .const import (
     CONF_WEATHER_FORECAST_ENTITY,
     CONTROL_INTERVAL_SECONDS,
     DEFAULT_HEAT_CURVE,
+    DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C,
     DEFAULT_HW_TEMP,
     DEFAULT_INDOOR_TEMP,
     DEFAULT_LEGIONELLA_DURATION_HOURS,
@@ -50,6 +55,8 @@ from .const import (
     DEFAULT_LEGIONELLA_MIN_DAYS,
     DEFAULT_PRICE_THRESHOLD,
     DOMAIN,
+    HW_AUX_GUARD_AUX_ON_W,
+    HW_AUX_GUARD_EVENT_MIN_INTERVAL_SECONDS,
     HW_REDUCTION_HEATING_TIMEOUT_HOURS,
     HW_REDUCTION_NO_HEATING_TIMEOUT_MINUTES,
     HW_REDUCTION_TRIGGER_HOURS,
@@ -58,10 +65,12 @@ from .const import (
     LEGIONELLA_PASSIVE_THRESHOLD_C,
     MODE_REENTRY_COOLDOWN_SECONDS,
     QUARTERS_PER_DAY,
+    ROLLING_SAMPLE_MIN_SPACING_SECONDS,
     SUMMER_OUTDOOR_MAX_WINDOW_HOURS,
     WRITE_SETTLE_DELAY_SECONDS,
 )
-from .controller import decide
+from .controller import apply_hw_aux_guard, decide
+from .hw_aux_guard import GuardCaps, HwAuxGuard
 from .models import ForecastDay, FullDecision, Inputs, Mode, PumpActivity
 
 _LOGGER = logging.getLogger(__name__)
@@ -278,6 +287,10 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         self.summer_mode_enabled: bool = True
         self.legionella_boost_enabled: bool = False
         self.survive_solar_enabled: bool = False
+        self.hw_aux_guard_enabled: bool = False
+        self.hw_aux_guard_outdoor_threshold: float = float(
+            DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C
+        )
 
         self.default_indoor_temp: float = float(
             cfg.get(CONF_DEFAULT_INDOOR_TEMP, DEFAULT_INDOOR_TEMP)
@@ -324,6 +337,21 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         # end-time. Otherwise toggling back on later would silently resume the
         # original boost window.
         self._prev_legionella_enabled: bool = False
+        # HW aux guard session latch — see hw_aux_guard.py. Runtime-only: a
+        # restart mid-session simply re-arms on the next aux sighting.
+        self._hw_aux_guard = HwAuxGuard()
+        self._hw_aux_guard_caps = GuardCaps()
+        # Edge-triggered refresh bookkeeping (see _schedule_guard_refresh).
+        self._last_guard_refresh: datetime | None = None
+        self._guard_pump_id: str | None = None
+        self._guard_aux_id: str | None = None
+        self._unsub_guard_trailing: CALLBACK_TYPE | None = None
+        # Serialises cycles. HA's scheduled refresh and a requested refresh
+        # (switch toggle, guard edge) are not mutually exclusive, and a cycle
+        # awaits inside _apply (WRITE_SETTLE_DELAY_SECONDS between writes) —
+        # without this, two cycles could interleave their writes and their
+        # updates to the shared state machines.
+        self._update_lock = asyncio.Lock()
 
         # Rolling sample buffers for 60-min averages
         self._compressor_samples: deque[tuple[datetime, float]] = deque()
@@ -334,11 +362,16 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         # "has it actually been mild today" confirmation; the regime itself
         # comes from the forecast daily mean, not from this buffer.
         self._outdoor_temp_samples: deque[tuple[datetime, float]] = deque()
+        # Time of the last sample appended to the buffers above; extra cycles
+        # closer than ROLLING_SAMPLE_MIN_SPACING_SECONDS don't add samples.
+        self._last_buffer_sample: datetime | None = None
 
         # Anti-flap hysteresis state.
         # _last_decision is the most recent FullDecision *after* any hysteresis
-        # holds were applied — i.e. what we actually told the hardware. We
-        # compare new decisions against this so a held mode keeps being held.
+        # holds were applied — i.e. what we told the hardware, minus the HW
+        # aux guard cap, which is layered on afterwards and intentionally kept
+        # out of the baseline. We compare new decisions against this so a
+        # held mode keeps being held.
         # _mode_last_exit_time records when we last left each mode, used to
         # block re-entry inside MODE_REENTRY_COOLDOWN_SECONDS.
         # _prev_user_switches snapshots integration-owned + bound switches so
@@ -357,6 +390,10 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
     # ------------------------------------------------------------------
 
     async def _async_update_data(self) -> FullDecision:
+        async with self._update_lock:
+            return await self._async_run_cycle()
+
+    async def _async_run_cycle(self) -> FullDecision:
         """Run one full cascade evaluation and write back to bound entities.
 
         Each phase is wrapped in its own try/except so the log line tells you
@@ -392,6 +429,36 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
             user_action = self._detect_user_action(inputs)
             decision = self._apply_mode_hysteresis(
                 decision, inputs.now, bypass=user_action
+            )
+
+            # Post-cascade cap — deliberately after hysteresis, so a held
+            # decision can't mask it and the hysteresis baseline stays
+            # uncapped (see controller.apply_hw_aux_guard).
+            phase = "hw_aux_guard"
+            caps = self._hw_aux_guard.update(
+                now=inputs.now,
+                pump=inputs.pump_activity,
+                aux_power_w=inputs.aux_power_w,
+                outdoor_temp=inputs.outdoor_temp,
+                indoor_temp=inputs.indoor_temp,
+                default_indoor_temp=inputs.default_indoor_temp,
+                outdoor_threshold_c=self.hw_aux_guard_outdoor_threshold,
+                enabled=self.hw_aux_guard_enabled,
+                master_enabled=inputs.master_enabled,
+                # A boost that starts *this* cycle isn't "active" in computed
+                # yet — include the start flag so it isn't capped on cycle one.
+                legionella_active=(
+                    computed_data.is_legionella_boost_active
+                    or decision.start_legionella_boost
+                ),
+                hw_extra_on=bool(inputs.hot_water_extra_on),
+            )
+            self._hw_aux_guard_caps = caps
+            decision = apply_hw_aux_guard(
+                decision,
+                inputs,
+                climate_active=caps.climate,
+                hot_water_active=caps.hot_water,
             )
 
             _LOGGER.debug(
@@ -820,21 +887,32 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         short_cutoff = now - timedelta(hours=1)
         outdoor_cutoff = now - timedelta(hours=SUMMER_OUTDOOR_MAX_WINDOW_HOURS)
 
-        if comp_w is not None:
+        # The averages below are plain sample means, so they're only unbiased
+        # if samples arrive at a steady cadence. Scheduled cycles are 300 s
+        # apart; extra cycles (switch toggles, HW aux guard edges) evaluate
+        # the cascade in full but don't add a sample.
+        take_sample = self._last_buffer_sample is None or (
+            now - self._last_buffer_sample
+        ).total_seconds() >= ROLLING_SAMPLE_MIN_SPACING_SECONDS
+        if take_sample:
+            self._last_buffer_sample = now
+
+        if comp_w is not None and take_sample:
             self._compressor_samples.append((now, comp_w))
         while self._compressor_samples and self._compressor_samples[0][0] < short_cutoff:
             self._compressor_samples.popleft()
 
-        self._heating_samples.append((now, pump == PumpActivity.HEATING))
+        if take_sample:
+            self._heating_samples.append((now, pump == PumpActivity.HEATING))
         while self._heating_samples and self._heating_samples[0][0] < short_cutoff:
             self._heating_samples.popleft()
 
-        if indoor_temp is not None:
+        if indoor_temp is not None and take_sample:
             self._indoor_temp_samples.append((now, indoor_temp))
         while self._indoor_temp_samples and self._indoor_temp_samples[0][0] < short_cutoff:
             self._indoor_temp_samples.popleft()
 
-        if outdoor_temp is not None:
+        if outdoor_temp is not None and take_sample:
             self._outdoor_temp_samples.append((now, outdoor_temp))
         while self._outdoor_temp_samples and self._outdoor_temp_samples[0][0] < outdoor_cutoff:
             self._outdoor_temp_samples.popleft()
@@ -955,8 +1033,96 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
             )
         _LOGGER.info("Smart Heat Control: reset to defaults (master disabled)")
 
+    # ------------------------------------------------------------------
+    # HW aux guard — edge-triggered refresh
+    # ------------------------------------------------------------------
+
+    @callback
+    def async_start_guard_listeners(self) -> None:
+        """Re-run the cycle promptly on the pump/aux edges the guard acts on.
+
+        Without this the guard reacts up to CONTROL_INTERVAL_SECONDS late —
+        several minutes of elpatron per HW run. The listener is registered
+        unconditionally but does nothing unless the guard switch and Master
+        are on, so users who don't use the feature get no extra cycles.
+        """
+        cfg: dict[str, Any] = {**self.entry.data, **self.entry.options}
+        self._guard_pump_id = cfg.get(CONF_PUMP_ACTIVITY_SENSOR)
+        self._guard_aux_id = cfg.get(CONF_AUX_POWER_SENSOR)
+        entity_ids = [e for e in (self._guard_pump_id, self._guard_aux_id) if e]
+        if not entity_ids or self._unsub_state_listener is not None:
+            return
+        self._unsub_state_listener = async_track_state_change_event(
+            self.hass, entity_ids, self._handle_guard_state_event
+        )
+
+    @callback
+    def _handle_guard_state_event(self, event: Event) -> None:
+        if not (self.hw_aux_guard_enabled and self.master_enabled):
+            return
+        old_state = event.data.get("old_state")
+        new_state = event.data.get("new_state")
+        old = old_state.state if old_state is not None else None
+        new = new_state.state if new_state is not None else None
+        guard = self._hw_aux_guard
+        entity_id = event.data.get("entity_id")
+        if entity_id == self._guard_aux_id:
+            wants = guard.wants_refresh_on_aux_change(old, new)
+            # Record the sighting even when no cycle is needed, so a short
+            # burst between two polls still counts for the lookback window.
+            new_w = _to_float(new)
+            if new_w is not None and new_w >= HW_AUX_GUARD_AUX_ON_W:
+                guard.note_aux_on(dt_util.utcnow())
+        elif entity_id == self._guard_pump_id:
+            cfg: dict[str, Any] = {**self.entry.data, **self.entry.options}
+            wants = guard.wants_refresh_on_pump_change(
+                old,
+                new,
+                outdoor_temp=_read_float(self.hass, cfg.get(CONF_OUTDOOR_TEMP_SENSOR)),
+                outdoor_threshold_c=self.hw_aux_guard_outdoor_threshold,
+            )
+        else:
+            return
+        if wants:
+            self._schedule_guard_refresh()
+
+    @callback
+    def _schedule_guard_refresh(self) -> None:
+        """Rate-limited refresh: at most one per HW_AUX_GUARD_EVENT_MIN_INTERVAL_
+        SECONDS; an edge inside the window becomes one trailing refresh at the
+        end of it rather than being dropped."""
+        if self._unsub_guard_trailing is not None:
+            return  # a trailing refresh is already queued
+        now = dt_util.utcnow()
+        elapsed = (
+            None if self._last_guard_refresh is None
+            else (now - self._last_guard_refresh).total_seconds()
+        )
+        if elapsed is None or elapsed >= HW_AUX_GUARD_EVENT_MIN_INTERVAL_SECONDS:
+            self._fire_guard_refresh()
+            return
+        self._unsub_guard_trailing = async_call_later(
+            self.hass,
+            HW_AUX_GUARD_EVENT_MIN_INTERVAL_SECONDS - elapsed,
+            self._trailing_guard_refresh,
+        )
+
+    @callback
+    def _trailing_guard_refresh(self, _now: datetime) -> None:
+        self._unsub_guard_trailing = None
+        self._fire_guard_refresh()
+
+    @callback
+    def _fire_guard_refresh(self) -> None:
+        self._last_guard_refresh = dt_util.utcnow()
+        _LOGGER.debug("SHC HW aux guard: state edge — running cycle now")
+        self.hass.async_create_task(self.async_request_refresh())
+
     async def async_shutdown(self) -> None:
         if self._unsub_state_listener is not None:
             self._unsub_state_listener()
             self._unsub_state_listener = None
+        if self._unsub_guard_trailing is not None:
+            self._unsub_guard_trailing()
+            self._unsub_guard_trailing = None
         await super().async_shutdown()
