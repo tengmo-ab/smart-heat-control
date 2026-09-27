@@ -43,6 +43,7 @@ from .const import (
     CONF_WEATHER_FORECAST_ENTITY,
     CONTROL_INTERVAL_SECONDS,
     DEFAULT_HEAT_CURVE,
+    DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C,
     DEFAULT_HW_TEMP,
     DEFAULT_INDOOR_TEMP,
     DEFAULT_LEGIONELLA_DURATION_HOURS,
@@ -61,7 +62,8 @@ from .const import (
     SUMMER_OUTDOOR_MAX_WINDOW_HOURS,
     WRITE_SETTLE_DELAY_SECONDS,
 )
-from .controller import decide
+from .controller import apply_hw_aux_guard, decide
+from .hw_aux_guard import HwAuxGuard
 from .models import ForecastDay, FullDecision, Inputs, Mode, PumpActivity
 
 _LOGGER = logging.getLogger(__name__)
@@ -278,6 +280,10 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         self.summer_mode_enabled: bool = True
         self.legionella_boost_enabled: bool = False
         self.survive_solar_enabled: bool = False
+        self.hw_aux_guard_enabled: bool = False
+        self.hw_aux_guard_outdoor_threshold: float = float(
+            DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C
+        )
 
         self.default_indoor_temp: float = float(
             cfg.get(CONF_DEFAULT_INDOOR_TEMP, DEFAULT_INDOOR_TEMP)
@@ -324,6 +330,9 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         # end-time. Otherwise toggling back on later would silently resume the
         # original boost window.
         self._prev_legionella_enabled: bool = False
+        # HW aux guard session latch — see hw_aux_guard.py. Runtime-only: a
+        # restart mid-session simply re-arms on the next aux sighting.
+        self._hw_aux_guard = HwAuxGuard()
 
         # Rolling sample buffers for 60-min averages
         self._compressor_samples: deque[tuple[datetime, float]] = deque()
@@ -337,8 +346,10 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
 
         # Anti-flap hysteresis state.
         # _last_decision is the most recent FullDecision *after* any hysteresis
-        # holds were applied — i.e. what we actually told the hardware. We
-        # compare new decisions against this so a held mode keeps being held.
+        # holds were applied — i.e. what we told the hardware, minus the HW
+        # aux guard cap, which is layered on afterwards and intentionally kept
+        # out of the baseline. We compare new decisions against this so a
+        # held mode keeps being held.
         # _mode_last_exit_time records when we last left each mode, used to
         # block re-entry inside MODE_REENTRY_COOLDOWN_SECONDS.
         # _prev_user_switches snapshots integration-owned + bound switches so
@@ -393,6 +404,22 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
             decision = self._apply_mode_hysteresis(
                 decision, inputs.now, bypass=user_action
             )
+
+            # Post-cascade cap — deliberately after hysteresis, so a held
+            # decision can't mask it and the hysteresis baseline stays
+            # uncapped (see controller.apply_hw_aux_guard).
+            phase = "hw_aux_guard"
+            guard_active = self._hw_aux_guard.update(
+                now=inputs.now,
+                pump=inputs.pump_activity,
+                aux_power_w=inputs.aux_power_w,
+                outdoor_temp=inputs.outdoor_temp,
+                outdoor_threshold_c=self.hw_aux_guard_outdoor_threshold,
+                enabled=self.hw_aux_guard_enabled,
+                master_enabled=inputs.master_enabled,
+                legionella_active=computed_data.is_legionella_boost_active,
+            )
+            decision = apply_hw_aux_guard(decision, inputs, active=guard_active)
 
             _LOGGER.debug(
                 "SHC cascade: mode=%s hw_mode=%s degraded=%s "

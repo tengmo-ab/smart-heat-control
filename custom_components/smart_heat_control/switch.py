@@ -41,6 +41,9 @@ _SWITCHES: tuple[SwitchDef, ...] = (
     SwitchDef("summer_mode_enabled", "Summer Mode", True, "mdi:weather-sunny"),
     SwitchDef("legionella_boost_enabled", "Legionella Boost", False, "mdi:bacteria"),
     SwitchDef("survive_solar_enabled", "Survive on Solar", False, "mdi:solar-power"),
+    # Off by default: it lowers comfort targets during cold-weather HW runs,
+    # which only makes sense once the user has seen the elpatron problem.
+    SwitchDef("hw_aux_guard_enabled", "HW Aux Guard", False, "mdi:heating-coil"),
 )
 
 

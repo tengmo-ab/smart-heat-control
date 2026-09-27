@@ -5,9 +5,12 @@ are marked with ``# FIX (v2):``.
 """
 from __future__ import annotations
 
+import dataclasses
+
 from .const import (
     AUX_POWER_CHEAP_HW_WINTER_LIMIT_W,
     COMPRESSOR_LOW_POWER_CHEAP_W,
+    HW_AUX_GUARD_STEP,
     MAX_CLIMATE_TEMP,
     MAX_HEAT_CURVE,
     MAX_HW_TEMP,
@@ -429,6 +432,53 @@ def _decide_hot_water(
 
     # ---- Branch 8: default ----------------------------------------------
     return HwDecision(mode=HwMode.DEFAULT, target_temp=base_default)
+
+
+# ---------------------------------------------------------------------------
+# HW aux guard — post-cascade climate cap
+# ---------------------------------------------------------------------------
+
+def apply_hw_aux_guard(
+    decision: FullDecision,
+    inputs: Inputs,
+    *,
+    active: bool,
+) -> FullDecision:
+    """Cap climate targets at (user default - HW_AUX_GUARD_STEP) while active.
+
+    Applied by the coordinator *after* the anti-flap layer, never inside the
+    cascade: a held decision (blocked upgrade) replays the previous cycle's
+    targets, which would otherwise mask the cap for up to the 20 min cooldown
+    — most of a HW session. Keeping it outside also leaves the hysteresis
+    baseline uncapped, so the targets restore cleanly when the session ends.
+
+    A cap rather than a subtraction: whatever the cascade already chose below
+    the cap stays as it is, so the guard never compounds with reductions the
+    cascade made on its own. The mode is left untouched — mode strings are
+    stable stats values, and the guard is visible on its own binary sensor.
+    ``None`` targets (master off, degraded) stay ``None``: nothing is written.
+    """
+    if not active:
+        return decision
+    climate = decision.climate
+    temp_cap = max(inputs.default_indoor_temp - HW_AUX_GUARD_STEP, MIN_CLIMATE_TEMP)
+    curve_cap = max(inputs.default_heat_curve - HW_AUX_GUARD_STEP, MIN_HEAT_CURVE)
+    capped = dataclasses.replace(
+        climate,
+        target_temp=(
+            None if climate.target_temp is None
+            else round(min(climate.target_temp, temp_cap), 1)
+        ),
+        target_curve=(
+            None if climate.target_curve is None
+            else round(min(climate.target_curve, curve_cap), 1)
+        ),
+    )
+    return dataclasses.replace(
+        decision,
+        climate=capped,
+        trace=decision.trace + ("climate:hw_aux_guard",),
+    )
 
 
 # ---------------------------------------------------------------------------

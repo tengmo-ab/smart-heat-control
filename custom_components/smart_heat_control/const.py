@@ -56,6 +56,9 @@ CONF_PRICE_THRESHOLD = "price_threshold"
 CONF_LEGIONELLA_MIN_DAYS = "legionella_min_days"
 CONF_LEGIONELLA_MAX_DAYS = "legionella_max_days"
 CONF_LEGIONELLA_DURATION_HOURS = "legionella_duration_hours"
+# Not part of the config flow — used only as the NumberDef key so the entity
+# seeds from DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C on first install.
+CONF_HW_AUX_GUARD_OUTDOOR_THRESHOLD = "hw_aux_guard_outdoor_threshold"
 
 # ---------------------------------------------------------------------------
 # Default values (mirror v1's input_number defaults so behaviour ports 1:1)
@@ -67,6 +70,7 @@ DEFAULT_PRICE_THRESHOLD = 100  # öre/kWh — tröskel ovan vilken "billigt" int
 DEFAULT_LEGIONELLA_MIN_DAYS = 6
 DEFAULT_LEGIONELLA_MAX_DAYS = 10
 DEFAULT_LEGIONELLA_DURATION_HOURS = 2
+DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C = -5  # °C, integer
 
 # Passive legionella detection — credit a pasteurization event whenever the
 # hot-water tank reaches LEGIONELLA_PASSIVE_THRESHOLD_C and sustains it for
@@ -234,6 +238,36 @@ AUX_ALLOWED_DEFAULT_W = 0
 HW_REDUCTION_TRIGGER_HOURS = 1.5
 HW_REDUCTION_HEATING_TIMEOUT_HOURS = 1
 HW_REDUCTION_NO_HEATING_TIMEOUT_MINUTES = 10
+
+# HW aux guard — keep the resistive addition (elpatron) out of hot-water
+# production in cold weather.
+#
+# Observed on an RX95 at <= -5 °C with heat curve 4.0 / indoor 20-21 °C: when
+# the pump switches to hot water it brings in the elpatron, even with HW set
+# to lowest priority. The pump is racing to finish HW so it can return to a
+# space-heating demand it considers urgent. Lowering that demand for the
+# duration of the HW session removes the urgency.
+#
+# While a HW session is latched, climate targets are capped at
+# (user default - HW_AUX_GUARD_STEP) — 21 °C / 4.0 become 20 °C / 3.0. A cap,
+# not a subtraction: if the cascade already chose something lower (the
+# Default branch cuts indoor by 1.5 °C while aux runs), it is left alone,
+# so the guard never compounds with reductions already in place.
+HW_AUX_GUARD_STEP = 1.0
+# Elpatron counts as "on" at or above this draw. Low enough to catch the
+# smallest real heater step, high enough to ignore register rounding.
+HW_AUX_GUARD_AUX_ON_W = 100.0
+# Aux seen up to this long *before* the HW session started also arms the
+# guard: if the elpatron was already running for space heating when HW
+# begins, the pump will carry it straight into the HW run.
+HW_AUX_GUARD_AUX_LOOKBACK_MINUTES = 15
+# The latch holds for the whole HW session, because lowering the demand is
+# what switches the elpatron *off* — releasing when aux stops would restore
+# the demand and bring it straight back. The session ends immediately when
+# the pump returns to space heating, or after this long in any other state
+# (Idle between compressor cycles, sensor unavailable), so a single odd
+# 5-minute sample doesn't end the session mid-run.
+HW_AUX_GUARD_RELEASE_GRACE_MINUTES = 10
 
 # Day-half boundary (v1: current_hour < 12 ⇒ AM).
 AM_BOUNDARY_HOUR = 12
