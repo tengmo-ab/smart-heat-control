@@ -240,22 +240,56 @@ HW_REDUCTION_HEATING_TIMEOUT_HOURS = 1
 HW_REDUCTION_NO_HEATING_TIMEOUT_MINUTES = 10
 
 # HW aux guard — keep the resistive addition (elpatron) out of hot-water
-# production in cold weather.
+# production in cold weather. See hw_aux_guard.py for the session lifecycle.
 #
 # Observed on an RX95 at <= -5 °C with heat curve 4.0 / indoor 20-21 °C: when
 # the pump switches to hot water it brings in the elpatron, even with HW set
 # to lowest priority. The pump is racing to finish HW so it can return to a
-# space-heating demand it considers urgent. Lowering that demand for the
-# duration of the HW session removes the urgency.
+# space-heating demand it considers urgent. The guard lowers that demand for
+# the duration of the HW session, and shortens the session itself.
 #
-# While a HW session is latched, climate targets are capped at
-# (user default - HW_AUX_GUARD_STEP) — 21 °C / 4.0 become 20 °C / 3.0. A cap,
-# not a subtraction: if the cascade already chose something lower (the
-# Default branch cuts indoor by 1.5 °C while aux runs), it is left alone,
-# so the guard never compounds with reductions already in place.
+# --- Climate cap -----------------------------------------------------------
+# Each target ends up at least STEP below what the cascade wanted *and* at
+# most STEP below the user default:
+#     target = min(cascade - STEP, default - STEP)
+# The first term makes it bite even when the cascade has already reduced
+# (Default cuts indoor 1.5 °C while aux runs — a pump that brings in the
+# elpatron at -1.5 needs to see -2.5 before anything changes). The second
+# makes it bite when the cascade is *raising* demand (Cheap Price 22 °C /
+# 6.0 would otherwise only drop to 21 / 5.0, still above default).
 HW_AUX_GUARD_STEP = 1.0
+# ...but never more than this far below the user default (21 → 18 °C,
+# 4.0 → 1.0), and never above what the cascade itself chose.
+HW_AUX_GUARD_MAX_REDUCTION = 3.0
+# The real comfort protection is measured, not a target: the climate cap
+# won't arm, and lets go for the rest of the session, when the house is
+# actually below default - this.
+HW_AUX_GUARD_INDOOR_FLOOR_DELTA_C = 1.5
+# Belt and braces on duration. HW_REDUCTION_TRIGGER_HOURS (1.5 h) already
+# ends an over-long HW run via Heating Priority; this caps the climate
+# reduction even if the pump-activity sensor misbehaves.
+HW_AUX_GUARD_MAX_ACTIVE_MINUTES = 90
+#
+# --- Hot-water cap ("shorter HW runs") ------------------------------------
+# Same shape as the climate cap: at least STEP below the cascade's HW target
+# and at most STEP below the HW default (50 → 45 °C). A shorter run means the
+# house goes without heat for less time — the other half of the problem.
+HW_AUX_GUARD_HW_STEP = 5.0
+# Floor: the same 40 °C the cascade itself writes whenever the elpatron runs
+# above 1 kW (v1 branch 7) — the lowest HW target it uses outside Heating
+# Priority, so the guard stays inside behaviour the house already lives with.
+HW_AUX_GUARD_HW_FLOOR_C = 40.0
+# After a guarded session ends, the HW cap is held this long. Restoring the
+# full setpoint the moment the pump reaches the capped one would make it
+# start a new HW run immediately (tank 45 °C vs setpoint 50 °C) — a
+# stop/restart loop caused by our own cap. An hour of normal draw-down
+# turns the next run into an ordinary one.
+HW_AUX_GUARD_HW_HOLD_MINUTES = 60
+#
+# --- Detection --------------------------------------------------------------
 # Elpatron counts as "on" at or above this draw. Low enough to catch the
 # smallest real heater step, high enough to ignore register rounding.
+# (Watts, like every other power threshold in the integration.)
 HW_AUX_GUARD_AUX_ON_W = 100.0
 # Aux seen up to this long *before* the HW session started also arms the
 # guard: if the elpatron was already running for space heating when HW
@@ -268,6 +302,20 @@ HW_AUX_GUARD_AUX_LOOKBACK_MINUTES = 15
 # (Idle between compressor cycles, sensor unavailable), so a single odd
 # 5-minute sample doesn't end the session mid-run.
 HW_AUX_GUARD_RELEASE_GRACE_MINUTES = 10
+#
+# --- Event-driven refresh -----------------------------------------------------
+# The cascade polls every CONTROL_INTERVAL_SECONDS; the guard additionally
+# re-runs it on the few pump/aux state edges it acts on (see
+# HwAuxGuard.wants_refresh_on_*). Edge-triggered cycles are rate-limited to
+# one per this many seconds — a later edge inside the window is not dropped
+# but coalesced into one trailing cycle — so a sensor chattering around a
+# threshold can't turn into a refresh storm.
+HW_AUX_GUARD_EVENT_MIN_INTERVAL_SECONDS = 60
+# Extra (non-scheduled) cycles must not skew the rolling averages, which are
+# plain sample means: a burst of event cycles during a HW run would
+# over-weight "not heating" in heating_duration_last_hour. Samples closer
+# than this to the previous one are skipped (the cycle still runs in full).
+ROLLING_SAMPLE_MIN_SPACING_SECONDS = 240
 
 # Day-half boundary (v1: current_hour < 12 ⇒ AM).
 AM_BOUNDARY_HOUR = 12

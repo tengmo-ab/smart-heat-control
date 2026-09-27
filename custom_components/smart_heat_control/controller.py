@@ -10,6 +10,9 @@ import dataclasses
 from .const import (
     AUX_POWER_CHEAP_HW_WINTER_LIMIT_W,
     COMPRESSOR_LOW_POWER_CHEAP_W,
+    HW_AUX_GUARD_HW_FLOOR_C,
+    HW_AUX_GUARD_HW_STEP,
+    HW_AUX_GUARD_MAX_REDUCTION,
     HW_AUX_GUARD_STEP,
     MAX_CLIMATE_TEMP,
     MAX_HEAT_CURVE,
@@ -438,46 +441,85 @@ def _decide_hot_water(
 # HW aux guard — post-cascade climate cap
 # ---------------------------------------------------------------------------
 
+def _guard_target(
+    cascade: float | None,
+    default: float,
+    step: float,
+    floor: float,
+) -> float | None:
+    """``min(cascade - step, default - step)``, floored, never above cascade.
+
+    - ``cascade - step`` bites even when the cascade already reduced: a pump
+      that brings in the elpatron at -1.5 must see -2.5 before anything
+      changes.
+    - ``default - step`` bites when the cascade is raising demand (Cheap
+      Price) — subtracting one step from a boost would still leave it above
+      default.
+    - The floor bounds the total reduction; the outer ``min`` guarantees the
+      guard only ever lowers — a cascade already under the floor (e.g.
+      Weather Anticipation at default - 4) is left alone.
+    """
+    if cascade is None:
+        return None
+    lowered = max(min(cascade - step, default - step), floor)
+    return round(min(cascade, lowered), 1)
+
+
 def apply_hw_aux_guard(
     decision: FullDecision,
     inputs: Inputs,
     *,
-    active: bool,
+    climate_active: bool,
+    hot_water_active: bool,
 ) -> FullDecision:
-    """Cap climate targets at (user default - HW_AUX_GUARD_STEP) while active.
+    """Lower climate and/or HW targets while the HW aux guard holds them.
 
     Applied by the coordinator *after* the anti-flap layer, never inside the
     cascade: a held decision (blocked upgrade) replays the previous cycle's
-    targets, which would otherwise mask the cap for up to the 20 min cooldown
-    — most of a HW session. Keeping it outside also leaves the hysteresis
-    baseline uncapped, so the targets restore cleanly when the session ends.
+    targets, which would otherwise mask the guard for up to the 20 min
+    cooldown — most of a HW session. Keeping it outside also leaves the
+    hysteresis baseline unguarded, so targets restore cleanly when the guard
+    lets go. Recomputed from the cascade every cycle, so it never accumulates.
 
-    A cap rather than a subtraction: whatever the cascade already chose below
-    the cap stays as it is, so the guard never compounds with reductions the
-    cascade made on its own. The mode is left untouched — mode strings are
-    stable stats values, and the guard is visible on its own binary sensor.
-    ``None`` targets (master off, degraded) stay ``None``: nothing is written.
+    Modes are untouched (stable stats strings; the guard has its own binary
+    sensor). ``None`` targets (master off, degraded) stay ``None`` — nothing
+    is written. A Legionella Boost HW decision is never touched: the cycle
+    that *starts* a boost runs before the boost counts as active, and
+    capping its 60 °C would sabotage the pasteurisation it exists for.
     """
-    if not active:
+    if not (climate_active or hot_water_active):
         return decision
+    trace = list(decision.trace)
     climate = decision.climate
-    temp_cap = max(inputs.default_indoor_temp - HW_AUX_GUARD_STEP, MIN_CLIMATE_TEMP)
-    curve_cap = max(inputs.default_heat_curve - HW_AUX_GUARD_STEP, MIN_HEAT_CURVE)
-    capped = dataclasses.replace(
-        climate,
-        target_temp=(
-            None if climate.target_temp is None
-            else round(min(climate.target_temp, temp_cap), 1)
-        ),
-        target_curve=(
-            None if climate.target_curve is None
-            else round(min(climate.target_curve, curve_cap), 1)
-        ),
-    )
+    hot_water = decision.hot_water
+
+    if climate_active:
+        d_in, d_curve = inputs.default_indoor_temp, inputs.default_heat_curve
+        climate = dataclasses.replace(
+            climate,
+            target_temp=_guard_target(
+                climate.target_temp, d_in, HW_AUX_GUARD_STEP,
+                max(d_in - HW_AUX_GUARD_MAX_REDUCTION, MIN_CLIMATE_TEMP),
+            ),
+            target_curve=_guard_target(
+                climate.target_curve, d_curve, HW_AUX_GUARD_STEP,
+                max(d_curve - HW_AUX_GUARD_MAX_REDUCTION, MIN_HEAT_CURVE),
+            ),
+        )
+        trace.append("climate:hw_aux_guard")
+
+    if hot_water_active and hot_water.mode != HwMode.LEGIONELLA_BOOST:
+        hot_water = dataclasses.replace(
+            hot_water,
+            target_temp=_guard_target(
+                hot_water.target_temp, inputs.default_hw_temp, HW_AUX_GUARD_HW_STEP,
+                max(HW_AUX_GUARD_HW_FLOOR_C, MIN_HW_TEMP),
+            ),
+        )
+        trace.append("hw:hw_aux_guard")
+
     return dataclasses.replace(
-        decision,
-        climate=capped,
-        trace=decision.trace + ("climate:hw_aux_guard",),
+        decision, climate=climate, hot_water=hot_water, trace=tuple(trace)
     )
 
 
