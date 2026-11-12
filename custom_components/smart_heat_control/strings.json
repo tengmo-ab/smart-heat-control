@@ -20,7 +20,8 @@
         "description": "Optional: bind power sensors for the heat pump compressor and the electric backup heater (elpatron/tillsatsvärmare). Used to detect when the backup heater is idle before entering Cheap Price mode.",
         "data": {
           "compressor_power_sensor": "Värmepumpsens kompressoreffekt (W) – valfri",
-          "aux_power_sensor": "Elpatron / tillsatsvärmare – effektsensor (W) – valfri"
+          "aux_power_sensor": "Elpatron / tillsatsvärmare – effektsensor (W) – valfri",
+          "compressor_load_sensor": "Kompressorns belastning i % av maxvarv (0–100) – valfri, för varmvattenplaneraren"
         }
       },
       "pricing": {
@@ -28,7 +29,8 @@
         "description": "Bind your spot-price sensor (Nord Pool, Tibber, ENTSO-e or template). The optional 'today' sensor enables 96-quarter price analysis — pick the sensor that has a 'prices' attribute with a list of 96 values.",
         "data": {
           "price_sensor": "Aktuellt spotpris (öre/kWh) – t.ex. Nord Pool SE3 Price",
-          "price_today_sensor": "Dagens prislista med 'prices'-attribut (96 kvartal) – valfri"
+          "price_today_sensor": "Dagens prislista med 'prices'-attribut (96 kvartal) – valfri",
+          "price_tomorrow_sensor": "Morgondagens prislista med 'prices'-attribut (96 kvartal) – valfri, för varmvattenplaneraren"
         }
       },
       "weather": {

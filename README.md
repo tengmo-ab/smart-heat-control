@@ -76,6 +76,21 @@ Logiken kommer från en YAML-automation som körts dagligen i 2 år på en Comfo
    - `binary_sensor.<enhetsnamn>_hw_aux_guard_active` visar `heating_demand_lowered`, `hot_water_setpoint_lowered`, `hw_session_started`, `hw_setpoint_hold_until`, `elpatron_last_on` och `last_release_reason`, så varje session går att förklara i efterhand.
    - Kräver att `pump_activity_sensor` och `aux_power_sensor` är bundna (elpatronens effekt i W — för Comfortzone "Addition effect", inte "Estimated aux power consumption" som är fläkt + standby).
 
+12. **Varmvattenplaneraren — duschar per dygn i stället för ett börvärde.** Switch **Hot Water Planner** (av som default; av = v1-kaskaden för varmvatten, orörd). Du anger hur många duschar hushållet vill ha tillgängliga per dygn (**Showers Per Day**, heltal — i praktiken antalet som duschar hemma) och hur många en full tank räcker till (**Showers Per Full Tank**, default 2). Planeraren fyller tanken för det, en gång, i dygnets billigaste fönster, och låter den annars vara.
+
+    **Bakgrund (RX95, 1 okt–11 nov 2026):** v1-kaskaden flyttar ett börvärde 45–55°C med priset. Pumpen fyller på så fort tanken ligger ~1,5°C under börvärdet, så varmvatten producerades 7 gånger per dygn — mest småpåfyllningar av stilleståndsförlust — och en dusch värmdes tillbaka direkt, mitt i kvällens pristopp. 41 av periodens 47 kWh elpatron gick i de varmvattenpassen, och 55 av 58 pass med elpatron startade inom 20 min efter att kompressorn gått på maxvarv för värmen.
+
+    - **Duschar känns igen i tanktemperaturen.** Givaren sitter lågt: en dusch sänker den 10–30°C på 10–20 min (1–3,6°C/min mot stilleståndsförlustens 0,005). En tappning börjar vid fall ≥ 0,25°C/min och pågår så länge fallet är ≥ 0,08°C/min. Totalt fall ≥ 15°C (eller slut under 35°C efter ett tydligt fall) = en dusch, 6–15°C = en halv, 3–6°C = småtappning. Detektorn går alltid när en tankgivare är bunden, även med switchen av.
+    - **Fyra lägen:** `Shower Reserve` (börvärdet på pumpens minimum 30°C — inga småpåfyllningar, och efter en dusch lyfts bara den kalla botten dit), `Planned Production` (dygnets påfyllning i billigaste sammanhängande fönster av kvartspriser), `Shower Refill` (fler duschar väntas i dag än tanken har kvar — fyll direkt), `Mid-day Boost` (solöverskott: default + 5°C).
+    - **Duschdygnet** räknas från 04:00. Påfyllningen ska vara klar till *klar-timmen*: timmen före vilken högst 5 % av hushållets duschar har börjat (lärs in från 60 dagars tappningar, 06:00 tills åtta duschar är kända). Mellan 04:00 och klar-timmen behöver tanken bara räcka till det som återstår i dag; därefter fylls en tank som inte räcker direkt, annars planeras nästa påfyllning till morgondagens klar-timme.
+    - **Exempel, 2 duschar/dygn och tank för 2:** dusch 19:00 och 20:00 → inget händer på kvällen (utöver pumpens egen lyftning till 30°C) → påfyllning i nattens billigaste ~2 timmar. Med 4 duschar/dygn fylls tanken i stället direkt efter de två första. Med 0 hålls bara reserven.
+    - **Elpatronen hålls utanför:** en produktion *startas* inte när kompressorn gått på maxvarv de senaste 20 min eller elpatronen varit på de senaste 15 — den väntar på ett lugnare läge, högst 6 h, och aldrig när tanken är tom och en dusch väntas. Kommer elpatronen ändå på under en produktion avbryts den och provas igen efter 45 min (högst två gånger per påfyllning).
+    - **Färskvara:** stilleståndsförlusten är ~7°C/dygn. Vatten äldre än 36 h räknas inte som en dusch, och en oanvänd tank får en påfyllning per dygn (när senaste uppvärmningen annars vore äldre än 20 h vid klar-timmen).
+    - **Det som går före planeraren**, i v1-ordning: Extra VV-switchen, en pågående legionella-boost, och Heating Priority efter 1,5 h sammanhängande VV (huset har stått utan värme — produktionen återupptas efteråt). Under semester planeras inga duschar förrän 8 h före hemkomst.
+    - **Sensorer:** `Showers Today` (med dagens tappningar som attribut), `Showers Available`, `Last Shower`, och `Hot Water Plan` (läge + skäl, planerat fönster, klar-timme, senaste produktionens utfall, timprofil).
+    - **Roller:** kräver `hot_water_temp_sensor` och `hot_water_setpoint_number`. `price_tomorrow_sensor` låter planeraren jämföra i kväll mot i morgon bitti (annars antas morgondagen likna i dag), `compressor_load_sensor` (0–100 %) ger maxvarvsspärren, `pump_activity_sensor` och `aux_power_sensor` ger övervakningen av en pågående produktion.
+    - **Begränsning:** pumpens lägsta börvärde är 30°C och givaren visar ~20°C efter en dusch, så pumpen startar alltid ett kort pass direkt efter duschen — det kan planeraren inte flytta. HW Aux Guard (punkt 11) kan kombineras med planeraren för just de passen.
+
 ## Arkitektur
 
 ```
@@ -87,12 +102,13 @@ custom_components/smart_heat_control/
 ├── computed.py            ✅ Beräkningslager (1:1-port av v1 variables:-block)
 ├── controller.py          ✅ Beslutskaskad (Weather → Price Peak → Cheap → Default + VV + legionella) + HW aux guard-tak
 ├── hw_aux_guard.py        ✅ VV-sessionsspärr som håller elpatronen borta från kall-VV
+├── hw_planner.py          ✅ Duschdetektor + varmvattenplanerare (duschar per dygn, billigaste fönster)
 ├── coordinator.py         ✅ DataUpdateCoordinator, _read_inputs, _apply, HW-reduktion SM
 ├── __init__.py            ✅ async_setup_entry / unload
-├── switch.py              ✅ master_enabled, cheap_price, price_peak, weather, summer_mode, legionella, solar, hw_aux_guard
-├── number.py              ✅ default_indoor_temp, heat_curve, hw_temp, price_threshold, legionella, hw_aux_guard_outdoor_threshold
+├── switch.py              ✅ master_enabled, cheap_price, price_peak, weather, summer_mode, legionella, solar, hw_aux_guard, hw_planner
+├── number.py              ✅ default_indoor_temp, heat_curve, hw_temp, price_threshold, legionella, hw_aux_guard_outdoor_threshold, hw_showers_per_day, hw_showers_per_tank
 ├── select.py              ✅ optimization_mode, hw_mode (read-only outputs)
-├── sensor.py              ✅ AM/PM-snittpriser, future_highest_temp, days_since_legionella, m.fl.
+├── sensor.py              ✅ AM/PM-snittpriser, future_highest_temp, days_since_legionella, m.fl. + showers_today, showers_available, last_shower, hot_water_plan
 ├── binary_sensor.py       ✅ hw_reduction_active, is_evening_expensive, wait_for_sun, is_summer_mode, hw_aux_guard_active
 ├── datetime.py            ✅ vacation_end, last_legionella_run
 └── strings.json           ✅ Config-flow UI-labels
@@ -112,8 +128,10 @@ custom_components/smart_heat_control/
 | Heating system | `pump_activity_sensor` | Valfri | Sensor med specifikt state: `"Idle"`, `"Making Hot Water"`, `"Heating"`, `"Defrosting"` | VV-reduktion och vissa boost-grenar avstängda |
 | Power | `compressor_power_sensor` | Valfri | Sensor med state i W eller kW (numeriskt) | "Full kompressor"-detektering avstängd |
 | Power | `aux_power_sensor` | Valfri | Sensor med state i W eller kW (numeriskt) | Tillsatsskydd avstängt — kan ge mer tillsatsdrift |
+| Power | `compressor_load_sensor` | Valfri | Sensor med state i % av maxvarv (0–100) | Varmvattenplaneraren kan inte undvika start vid maxvarv (elpatron-närvaro används ensam) |
 | Pricing | `price_sensor` | **Krav för prisopt.** | Sensor med state i öre/kWh (t.ex. `119`) | Hela pris-grenen avstängd, väder-only |
 | Pricing | `price_today_sensor` | **Starkt rekommenderad** | Sensor med attribut `prices` som en lista av 96 float-värden (eller `data` med dicts) | Utan denna: ingen Price Peak Reduction, ingen AM/PM-split, ingen Expensive Evening-detektion, inget today_avg. Endast `current_price` styr. |
+| Pricing | `price_tomorrow_sensor` | Valfri | Samma format som `price_today_sensor`, för morgondagen (tom tills priserna publicerats) | Varmvattenplaneraren antar att morgondagen liknar i dag |
 | Weather | `weather_forecast_entity` | Valfri | `weather.*` (t.ex. `weather.smhi`) med ett `forecast` attribut för dygnsprognos | Månadsbaserad winter-fallback, väder-anticipation av |
 | Solar/PV | `pv_excess_binary_sensor` | Valfri | `binary_sensor.*` (state `on`/`off`) | Inga PV-överskotts-justeringar |
 | Solar/PV | `solar_forecast_today_sensor` | Valfri | Sensor med state i kWh (float, t.ex. `15.5`) | "Survive solar"-läget avstängt |
@@ -143,6 +161,7 @@ Integrationen rapporterar nedgraderingen via `select.smart_heat_control_optimiza
 - [x] Engelska översättningar (`translations/en.json`)
 - [x] PNG-ikoner för HA 2026.3 local-brands (`brand/icon.png` + `logo.png` + @2x)
 - [ ] Svenska översättningar (`translations/sv.json`)
+- [x] Varmvattenplanerare: duschdetektering, duschar per dygn, billigaste produktionsfönster (0.6.0)
 - [ ] Testsvit (`tests/test_controller.py` med scenario per gren)
 - [ ] Diagnostik (redacted dump för felsökning)
 - [ ] Stats-migrationsguide för existerande v1-användare (comfortzone_settings_controller)

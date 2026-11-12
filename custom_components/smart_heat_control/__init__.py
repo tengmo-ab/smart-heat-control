@@ -62,6 +62,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         raise ConfigEntryNotReady(f"coordinator init failed: {ex}") from ex
 
+    # Hot-water tapping history — before the platforms, so the shower sensors
+    # and the first cascade see it.
+    await coordinator.async_load_hw_state()
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
     try:

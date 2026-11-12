@@ -20,7 +20,8 @@
         "description": "Optional: bind power sensors for the heat pump compressor and the electric backup heater (elpatron/tillsatsvärmare). Used to detect when the backup heater is idle before entering Cheap Price mode.",
         "data": {
           "compressor_power_sensor": "Heat Pump Compressor Power (W) – optional",
-          "aux_power_sensor": "Electric Backup Heater (Elpatron) Power (W) – optional"
+          "aux_power_sensor": "Electric Backup Heater (Elpatron) Power (W) – optional",
+          "compressor_load_sensor": "Compressor Load in % of maximum speed (0–100) – optional, used by the hot-water planner"
         }
       },
       "pricing": {
@@ -28,7 +29,8 @@
         "description": "Bind your spot-price sensor (Nord Pool, Tibber, ENTSO-e or template). The optional 'today' sensor enables 96-quarter price analysis — pick the sensor that has a 'prices' attribute with a list of 96 values.",
         "data": {
           "price_sensor": "Current Spot Price (öre/kWh) – e.g. Nord Pool SE3 Price",
-          "price_today_sensor": "Today's Price List with 'prices' attribute (96 quarters) – optional"
+          "price_today_sensor": "Today's Price List with 'prices' attribute (96 quarters) – optional",
+          "price_tomorrow_sensor": "Tomorrow's Price List with 'prices' attribute (96 quarters) – optional, used by the hot-water planner"
         }
       },
       "weather": {
@@ -93,7 +95,8 @@
         "description": "Optional power sensors for compressor and electric backup heater.",
         "data": {
           "compressor_power_sensor": "Heat Pump Compressor Power (W) – optional",
-          "aux_power_sensor": "Electric Backup Heater (Elpatron) Power (W) – optional"
+          "aux_power_sensor": "Electric Backup Heater (Elpatron) Power (W) – optional",
+          "compressor_load_sensor": "Compressor Load in % of maximum speed (0–100) – optional, used by the hot-water planner"
         }
       },
       "pricing": {
@@ -101,7 +104,8 @@
         "description": "Spot-price sensor and optional 96-quarter price list sensor.",
         "data": {
           "price_sensor": "Current Spot Price (öre/kWh)",
-          "price_today_sensor": "Today's Price List with 'prices' attribute (96 quarters) – optional"
+          "price_today_sensor": "Today's Price List with 'prices' attribute (96 quarters) – optional",
+          "price_tomorrow_sensor": "Tomorrow's Price List with 'prices' attribute (96 quarters) – optional, used by the hot-water planner"
         }
       },
       "weather": {

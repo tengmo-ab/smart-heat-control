@@ -14,6 +14,7 @@ from .const import (
     HW_AUX_GUARD_HW_STEP,
     HW_AUX_GUARD_MAX_REDUCTION,
     HW_AUX_GUARD_STEP,
+    HW_RESERVE_TEMP_C,
     MAX_CLIMATE_TEMP,
     MAX_HEAT_CURVE,
     MAX_HW_TEMP,
@@ -21,6 +22,7 @@ from .const import (
     MIN_HEAT_CURVE,
     MIN_HW_TEMP,
 )
+from .hw_planner import HwPlan
 from .models import (
     ClimateDecision,
     Computed,
@@ -37,10 +39,19 @@ from .models import (
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def decide(inputs: Inputs, computed: Computed, health: Health) -> FullDecision:
+def decide(
+    inputs: Inputs,
+    computed: Computed,
+    health: Health,
+    hw_plan: HwPlan | None = None,
+) -> FullDecision:
     """Run the full cascade and return what the coordinator should write.
 
     ``None`` in any target field means "leave that entity unchanged".
+
+    ``hw_plan`` is the hot-water planner's plan for this cycle. When it is
+    active it replaces the v1 hot-water cascade (see ``_apply_hw_plan``);
+    ``None`` or an inactive plan leaves the v1 cascade exactly as it was.
     """
     if not inputs.master_enabled:
         return FullDecision(
@@ -61,6 +72,8 @@ def decide(inputs: Inputs, computed: Computed, health: Health) -> FullDecision:
     trace: list[str] = []
     climate = _decide_climate(inputs, computed, trace)
     hot_water = _decide_hot_water(inputs, computed, climate.mode)
+    if hw_plan is not None and hw_plan.active:
+        hot_water = _apply_hw_plan(inputs, computed, hot_water, hw_plan, trace)
 
     start_legionella = _should_start_legionella(inputs, computed, climate)
     if start_legionella:
@@ -435,6 +448,55 @@ def _decide_hot_water(
 
     # ---- Branch 8: default ----------------------------------------------
     return HwDecision(mode=HwMode.DEFAULT, target_temp=base_default)
+
+
+# ---------------------------------------------------------------------------
+# Hot-water planner — replaces the v1 hot-water cascade when switched on
+# ---------------------------------------------------------------------------
+
+def hw_plan_paused(inputs: Inputs, computed: Computed) -> bool:
+    """True when something outranks the planner for the hot-water setpoint.
+
+    The coordinator passes this to the planner so a running production is not
+    judged on what the pump does while someone else holds the setpoint.
+    """
+    return bool(
+        inputs.hot_water_extra_on
+        or computed.is_legionella_boost_active
+        or inputs.hw_reduction_active
+    )
+
+
+def _apply_hw_plan(
+    inputs: Inputs,
+    computed: Computed,
+    cascade: HwDecision,
+    plan: HwPlan,
+    trace: list[str],
+) -> HwDecision:
+    """Hot-water decision with the planner on.
+
+    Three v1 branches keep their priority, in the same order as before:
+    the Extra hot water switch (branch 0, user intent), a running legionella
+    boost, and Heating Priority after an over-long hot-water run (the house
+    has gone without heat for 1.5 h — the planner resumes afterwards). The
+    price- and time-driven branches (1, 2, 3, 6, 7, 8) are what the planner
+    replaces: it decides from the same prices, per shower instead of per hour.
+    """
+    if inputs.hot_water_extra_on:
+        return cascade
+    if computed.is_legionella_boost_active:
+        return HwDecision(mode=HwMode.LEGIONELLA_BOOST, target_temp=min(60.0, MAX_HW_TEMP))
+    if inputs.hw_reduction_active:
+        return HwDecision(
+            mode=HwMode.HEATING_PRIORITY,
+            target_temp=max(HW_RESERVE_TEMP_C, MIN_HW_TEMP),
+        )
+    trace.append(f"hw:planner:{plan.state}")
+    return HwDecision(
+        mode=plan.mode,
+        target_temp=min(max(plan.target_temp, MIN_HW_TEMP), MAX_HW_TEMP),
+    )
 
 
 # ---------------------------------------------------------------------------

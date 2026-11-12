@@ -44,6 +44,10 @@ _SWITCHES: tuple[SwitchDef, ...] = (
     # Off by default: it lowers comfort targets during cold-weather HW runs,
     # which only makes sense once the user has seen the elpatron problem.
     SwitchDef("hw_aux_guard_enabled", "HW Aux Guard", False, "mdi:heating-coil"),
+    # Off by default: it replaces the proven v1 hot-water cascade with the
+    # shower planner (hw_planner.py) — an explicit opt-in, and switching it
+    # off hands the setpoint straight back to the v1 cascade.
+    SwitchDef("hw_planner_enabled", "Hot Water Planner", False, "mdi:shower-head"),
 )
 
 

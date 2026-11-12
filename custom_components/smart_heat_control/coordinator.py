@@ -16,6 +16,7 @@ from homeassistant.helpers.event import (
     async_call_later,
     async_track_state_change_event,
 )
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .computed import assess_health, compute
@@ -24,6 +25,7 @@ from .const import (
     CONF_BATTERY_DISCHARGING_BINARY_SENSOR,
     CONF_BRIDGE_TO_SOLAR_BINARY_SENSOR,
     CONF_CLIMATE_ENTITY,
+    CONF_COMPRESSOR_LOAD_SENSOR,
     CONF_COMPRESSOR_POWER_SENSOR,
     CONF_DEFAULT_HEAT_CURVE,
     CONF_DEFAULT_HW_TEMP,
@@ -41,6 +43,7 @@ from .const import (
     CONF_PRICE_SENSOR,
     CONF_PRICE_THRESHOLD,
     CONF_PRICE_TODAY_SENSOR,
+    CONF_PRICE_TOMORROW_SENSOR,
     CONF_PUMP_ACTIVITY_SENSOR,
     CONF_PV_EXCESS_BINARY_SENSOR,
     CONF_SOLAR_FORECAST_TODAY_SENSOR,
@@ -48,6 +51,8 @@ from .const import (
     CONTROL_INTERVAL_SECONDS,
     DEFAULT_HEAT_CURVE,
     DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C,
+    DEFAULT_HW_SHOWERS_PER_DAY,
+    DEFAULT_HW_SHOWERS_PER_TANK,
     DEFAULT_HW_TEMP,
     DEFAULT_INDOOR_TEMP,
     DEFAULT_LEGIONELLA_DURATION_HOURS,
@@ -60,6 +65,9 @@ from .const import (
     HW_REDUCTION_HEATING_TIMEOUT_HOURS,
     HW_REDUCTION_NO_HEATING_TIMEOUT_MINUTES,
     HW_REDUCTION_TRIGGER_HOURS,
+    HW_STRAIN_AUX_LOOKBACK_MINUTES,
+    HW_STRAIN_LOAD_PCT,
+    HW_STRAIN_LOOKBACK_MINUTES,
     LEGIONELLA_PASSIVE_EXIT_C,
     LEGIONELLA_PASSIVE_SUSTAIN_MINUTES,
     LEGIONELLA_PASSIVE_THRESHOLD_C,
@@ -69,11 +77,16 @@ from .const import (
     SUMMER_OUTDOOR_MAX_WINDOW_HOURS,
     WRITE_SETTLE_DELAY_SECONDS,
 )
-from .controller import apply_hw_aux_guard, decide
+from .controller import apply_hw_aux_guard, decide, hw_plan_paused
 from .hw_aux_guard import GuardCaps, HwAuxGuard
+from .hw_planner import Draw, HwPlan, HwPlanner, ShowerTracker
 from .models import ForecastDay, FullDecision, Inputs, Mode, PumpActivity
 
 _LOGGER = logging.getLogger(__name__)
+
+# Persisted hot-water tapping history (ShowerTracker.as_dict).
+_HW_STORE_VERSION = 1
+_HW_STORE_SAVE_DELAY_SECONDS = 15
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +111,10 @@ _HW_MODE_DEMAND_LEVEL: dict[str, int] = {
     "Night Boost": 2,
     "Mid-day Boost": 2,
     "Legionella Boost": 3,
+    # Hot-water planner
+    "Shower Reserve": 0,
+    "Planned Production": 2,
+    "Shower Refill": 2,
 }
 
 
@@ -291,6 +308,9 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         self.hw_aux_guard_outdoor_threshold: float = float(
             DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C
         )
+        self.hw_planner_enabled: bool = False
+        self.hw_showers_per_day: float = float(DEFAULT_HW_SHOWERS_PER_DAY)
+        self.hw_showers_per_tank: float = float(DEFAULT_HW_SHOWERS_PER_TANK)
 
         self.default_indoor_temp: float = float(
             cfg.get(CONF_DEFAULT_INDOOR_TEMP, DEFAULT_INDOOR_TEMP)
@@ -346,6 +366,21 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         self._guard_pump_id: str | None = None
         self._guard_aux_id: str | None = None
         self._unsub_guard_trailing: CALLBACK_TYPE | None = None
+        # Hot-water planner — see hw_planner.py. The tracker (tapping history
+        # and tank bookkeeping) is persisted; the planner's latches are
+        # runtime-only, a restart simply re-plans. The tracker runs whenever a
+        # tank sensor is bound, also with the planner switch off, so the
+        # shower sensors and the hourly profile work before anyone opts in.
+        self._shower_tracker = ShowerTracker()
+        self._hw_planner = HwPlanner()
+        self._hw_plan: HwPlan | None = None
+        self._hw_store: Store[dict[str, Any]] = Store(
+            hass, _HW_STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.hot_water"
+        )
+        self._hw_temp_id: str | None = None
+        self._load_id: str | None = None
+        # Last time the compressor ran at (nearly) maximum speed.
+        self._compressor_load_high_at: datetime | None = None
         # Serialises cycles. HA's scheduled refresh and a requested refresh
         # (switch toggle, guard edge) are not mutually exclusive, and a cycle
         # awaits inside _apply (WRITE_SETTLE_DELAY_SECONDS between writes) —
@@ -422,8 +457,11 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
             computed_data = compute(inputs, health, self.hass.config.time_zone)
             self._last_computed = computed_data
 
+            phase = "hw_planner"
+            hw_plan = self._update_hw_planner(inputs, computed_data, tz)
+
             phase = "decide"
-            decision = decide(inputs, computed_data, health)
+            decision = decide(inputs, computed_data, health, hw_plan)
 
             phase = "hysteresis"
             user_action = self._detect_user_action(inputs)
@@ -547,6 +585,7 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
             "legionella": inputs.legionella_boost_enabled,
             "survive_solar": inputs.survive_solar_enabled,
             "hw_extra": bool(inputs.hot_water_extra_on),
+            "hw_planner": self.hw_planner_enabled,
         }
         changed = (
             self._prev_user_switches is not None
@@ -708,6 +747,9 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         price_today_id = cfg.get(CONF_PRICE_TODAY_SENSOR)
         current_price = _read_float(hass, cfg.get(CONF_PRICE_SENSOR))
         price_quarters = _parse_price_quarters(hass, price_today_id)
+        price_quarters_tomorrow = _parse_price_quarters(
+            hass, cfg.get(CONF_PRICE_TOMORROW_SENSOR)
+        )
         if price_quarters:
             today_avg: float | None = sum(price_quarters) / len(price_quarters)
         else:
@@ -747,6 +789,7 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
             current_price=current_price,
             today_avg_price=today_avg,
             price_quarters=price_quarters,
+            price_quarters_tomorrow=price_quarters_tomorrow,
             weather_forecast=weather_forecast,
             indoor_max_recent_temp=indoor_max,
             outdoor_max_recent_temp=outdoor_max,
@@ -781,6 +824,127 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
                 else False
             ),
         )
+
+    # ------------------------------------------------------------------
+    # Hot-water planner
+    # ------------------------------------------------------------------
+
+    async def async_load_hw_state(self) -> None:
+        """Restore the tapping history. Called once before the first cycle."""
+        try:
+            self._shower_tracker.restore(await self._hw_store.async_load())
+        except Exception:  # noqa: BLE001 — a corrupt store must not block setup
+            _LOGGER.exception(
+                "SHC: could not load the hot-water history — starting empty"
+            )
+
+    def _update_hw_planner(
+        self, inputs: Inputs, computed: Any, tz: ZoneInfo
+    ) -> HwPlan | None:
+        """Run the hot-water planner for this cycle.
+
+        Returns None when no tank sensor is bound (nothing to plan from). The
+        returned plan is ``active`` only when the planner switch and Master
+        are on; otherwise it just carries the shower bookkeeping for the
+        sensors and the v1 hot-water cascade decides.
+        """
+        cfg: dict[str, Any] = {**self.entry.data, **self.entry.options}
+        if not cfg.get(CONF_HOT_WATER_TEMP_SENSOR):
+            self._hw_plan = None
+            return None
+        now = inputs.now
+        tracker = self._shower_tracker
+        draw = tracker.flush(now)
+        if draw is not None:
+            self._log_draw(draw)
+
+        load = _read_float(self.hass, cfg.get(CONF_COMPRESSOR_LOAD_SENSOR))
+        if load is not None and load >= HW_STRAIN_LOAD_PCT:
+            self._compressor_load_high_at = now
+        aux_last_on = self._hw_aux_guard.aux_last_on
+        strained = (
+            (
+                self._compressor_load_high_at is not None
+                and now - self._compressor_load_high_at
+                <= timedelta(minutes=HW_STRAIN_LOOKBACK_MINUTES)
+            )
+            or (
+                inputs.aux_power_w is not None
+                and inputs.aux_power_w >= HW_AUX_GUARD_AUX_ON_W
+            )
+            or (
+                aux_last_on is not None
+                and now - aux_last_on
+                <= timedelta(minutes=HW_STRAIN_AUX_LOOKBACK_MINUTES)
+            )
+        )
+
+        plan = self._hw_planner.update(
+            now=now,
+            tz=tz,
+            tracker=tracker,
+            enabled=(
+                self.hw_planner_enabled
+                and inputs.master_enabled
+                and bool(cfg.get(CONF_HOT_WATER_SETPOINT_NUMBER))
+            ),
+            tank_temp=inputs.hot_water_temp,
+            pump=inputs.pump_activity,
+            aux_power_w=inputs.aux_power_w,
+            strained=strained,
+            has_pv_excess=inputs.has_pv_excess,
+            prices_today=inputs.price_quarters,
+            prices_tomorrow=inputs.price_quarters_tomorrow,
+            showers_per_day=self.hw_showers_per_day,
+            showers_per_tank=self.hw_showers_per_tank,
+            default_hw_temp=inputs.default_hw_temp,
+            vacation_hours_left=(
+                computed.hours_to_vacation_end
+                if computed.is_vacation_active else None
+            ),
+            paused=hw_plan_paused(inputs, computed),
+        )
+        self._hw_plan = plan
+        if tracker.dirty:
+            tracker.dirty = False
+            self._hw_store.async_delay_save(
+                tracker.as_dict, _HW_STORE_SAVE_DELAY_SECONDS
+            )
+        return plan
+
+    def _log_draw(self, draw: Draw) -> None:
+        _LOGGER.info(
+            "SHC hot water: tapping %.1f -> %.1f °C in %.0f min (%.1f shower)",
+            draw.from_c,
+            draw.to_c,
+            (draw.end - draw.start).total_seconds() / 60,
+            draw.showers,
+        )
+
+    @callback
+    def _handle_hw_temp_event(self, old_state: Any, new_state: Any) -> None:
+        """Feed every changed tank reading to the tapping detector.
+
+        Event-driven because a shower is over in 10-15 minutes: the 5-minute
+        cycle would see two or three readings of it, the sensor delivers one
+        per poll.
+        """
+        if new_state is None:
+            return
+        value = _to_float(new_state.state)
+        if value is None:
+            return
+        if old_state is not None and _to_float(old_state.state) == value:
+            return  # attribute-only update — a flat sample would end a tapping
+        draw = self._shower_tracker.note_temp(
+            new_state.last_updated, value, self.default_hw_temp
+        )
+        if draw is None:
+            return
+        self._log_draw(draw)
+        if draw.showers > 0 and self.hw_planner_enabled and self.master_enabled:
+            # A shower may mean a refill is due — don't wait for the next poll.
+            self._schedule_guard_refresh()
 
     # ------------------------------------------------------------------
     # Internal state machines
@@ -1049,23 +1213,63 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         cfg: dict[str, Any] = {**self.entry.data, **self.entry.options}
         self._guard_pump_id = cfg.get(CONF_PUMP_ACTIVITY_SENSOR)
         self._guard_aux_id = cfg.get(CONF_AUX_POWER_SENSOR)
-        entity_ids = [e for e in (self._guard_pump_id, self._guard_aux_id) if e]
+        # The hot-water planner listens on the same subscription: every tank
+        # reading (tapping detection) and the compressor load (so a short
+        # spell at maximum between two cycles still counts).
+        self._hw_temp_id = cfg.get(CONF_HOT_WATER_TEMP_SENSOR)
+        self._load_id = cfg.get(CONF_COMPRESSOR_LOAD_SENSOR)
+        entity_ids = [
+            e
+            for e in (
+                self._guard_pump_id, self._guard_aux_id,
+                self._hw_temp_id, self._load_id,
+            )
+            if e
+        ]
         if not entity_ids or self._unsub_state_listener is not None:
             return
+        if self._hw_temp_id:
+            # Seed the detector with the current reading.
+            self._handle_hw_temp_event(None, self.hass.states.get(self._hw_temp_id))
         self._unsub_state_listener = async_track_state_change_event(
             self.hass, entity_ids, self._handle_guard_state_event
         )
 
     @callback
     def _handle_guard_state_event(self, event: Event) -> None:
-        if not (self.hw_aux_guard_enabled and self.master_enabled):
-            return
         old_state = event.data.get("old_state")
         new_state = event.data.get("new_state")
+        entity_id = event.data.get("entity_id")
+        if entity_id == self._hw_temp_id:
+            self._handle_hw_temp_event(old_state, new_state)
+            return
         old = old_state.state if old_state is not None else None
         new = new_state.state if new_state is not None else None
+        if entity_id == self._load_id:
+            load = _to_float(new)
+            if load is not None and load >= HW_STRAIN_LOAD_PCT:
+                self._compressor_load_high_at = dt_util.utcnow()
+            return
+        if not self.master_enabled:
+            return
+        if (
+            entity_id == self._guard_aux_id
+            and self.hw_planner_enabled
+            and self._hw_planner.producing
+        ):
+            # Elpatron during a planned production: let the planner stop it
+            # now rather than up to a polling interval later.
+            old_w, new_w = _to_float(old), _to_float(new)
+            if (
+                new_w is not None
+                and new_w >= HW_AUX_GUARD_AUX_ON_W
+                and (old_w is None or old_w < HW_AUX_GUARD_AUX_ON_W)
+            ):
+                self._hw_aux_guard.note_aux_on(dt_util.utcnow())
+                self._schedule_guard_refresh()
+        if not self.hw_aux_guard_enabled:
+            return
         guard = self._hw_aux_guard
-        entity_id = event.data.get("entity_id")
         if entity_id == self._guard_aux_id:
             wants = guard.wants_refresh_on_aux_change(old, new)
             # Record the sighting even when no cycle is needed, so a short

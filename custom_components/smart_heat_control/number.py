@@ -17,12 +17,16 @@ from .const import (
     CONF_DEFAULT_HW_TEMP,
     CONF_DEFAULT_INDOOR_TEMP,
     CONF_HW_AUX_GUARD_OUTDOOR_THRESHOLD,
+    CONF_HW_SHOWERS_PER_DAY,
+    CONF_HW_SHOWERS_PER_TANK,
     CONF_LEGIONELLA_DURATION_HOURS,
     CONF_LEGIONELLA_MAX_DAYS,
     CONF_LEGIONELLA_MIN_DAYS,
     CONF_PRICE_THRESHOLD,
     DEFAULT_HEAT_CURVE,
     DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C,
+    DEFAULT_HW_SHOWERS_PER_DAY,
+    DEFAULT_HW_SHOWERS_PER_TANK,
     DEFAULT_HW_TEMP,
     DEFAULT_INDOOR_TEMP,
     DEFAULT_LEGIONELLA_DURATION_HOURS,
@@ -94,6 +98,19 @@ _NUMBERS: tuple[NumberDef, ...] = (
         "hw_aux_guard_outdoor_threshold", CONF_HW_AUX_GUARD_OUTDOOR_THRESHOLD,
         "HW Aux Guard Outdoor Threshold", DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C,
         -30.0, 10.0, 1.0, "°C", "mdi:snowflake-thermometer",
+    ),
+    # Hot-water planner: how many showers the household wants per day (set it
+    # to the number of people who shower at home; 0 = reserve only), and how
+    # many one full tank delivers.
+    NumberDef(
+        "hw_showers_per_day", CONF_HW_SHOWERS_PER_DAY,
+        "Showers Per Day", DEFAULT_HW_SHOWERS_PER_DAY,
+        0.0, 10.0, 1.0, None, "mdi:shower-head",
+    ),
+    NumberDef(
+        "hw_showers_per_tank", CONF_HW_SHOWERS_PER_TANK,
+        "Showers Per Full Tank", DEFAULT_HW_SHOWERS_PER_TANK,
+        1.0, 6.0, 0.5, None, "mdi:water-boiler",
     ),
 )
 

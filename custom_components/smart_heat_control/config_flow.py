@@ -45,6 +45,7 @@ from .const import (
     CONF_BATTERY_DISCHARGING_BINARY_SENSOR,
     CONF_BRIDGE_TO_SOLAR_BINARY_SENSOR,
     CONF_CLIMATE_ENTITY,
+    CONF_COMPRESSOR_LOAD_SENSOR,
     CONF_COMPRESSOR_POWER_SENSOR,
     CONF_DEFAULT_HEAT_CURVE,
     CONF_DEFAULT_HW_TEMP,
@@ -62,6 +63,7 @@ from .const import (
     CONF_PRICE_SENSOR,
     CONF_PRICE_THRESHOLD,
     CONF_PRICE_TODAY_SENSOR,
+    CONF_PRICE_TOMORROW_SENSOR,
     CONF_PUMP_ACTIVITY_SENSOR,
     CONF_PV_EXCESS_BINARY_SENSOR,
     CONF_SOLAR_FORECAST_TODAY_SENSOR,
@@ -185,6 +187,10 @@ def _power_schema(defaults: dict[str, Any]) -> vol.Schema:
                 CONF_AUX_POWER_SENSOR,
                 default=defaults.get(CONF_AUX_POWER_SENSOR, vol.UNDEFINED),
             ): _power_sensor(),
+            vol.Optional(
+                CONF_COMPRESSOR_LOAD_SENSOR,
+                default=defaults.get(CONF_COMPRESSOR_LOAD_SENSOR, vol.UNDEFINED),
+            ): _entity("sensor"),
         }
     )
 
@@ -199,6 +205,10 @@ def _pricing_schema(defaults: dict[str, Any]) -> vol.Schema:
             vol.Optional(
                 CONF_PRICE_TODAY_SENSOR,
                 default=defaults.get(CONF_PRICE_TODAY_SENSOR, vol.UNDEFINED),
+            ): _price_sensor(),
+            vol.Optional(
+                CONF_PRICE_TOMORROW_SENSOR,
+                default=defaults.get(CONF_PRICE_TOMORROW_SENSOR, vol.UNDEFINED),
             ): _price_sensor(),
         }
     )

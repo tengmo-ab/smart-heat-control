@@ -26,6 +26,10 @@ CONF_PUMP_ACTIVITY_SENSOR = "pump_activity_sensor"
 # Power monitoring (optional)
 CONF_COMPRESSOR_POWER_SENSOR = "compressor_power_sensor"
 CONF_AUX_POWER_SENSOR = "aux_power_sensor"
+# Compressor load in percent of its maximum speed (0-100). Used only by the
+# hot-water planner, to avoid starting hot water while the compressor is
+# already flat out for space heating (see hw_planner.py).
+CONF_COMPRESSOR_LOAD_SENSOR = "compressor_load_sensor"
 
 # Pricing
 CONF_PRICE_SENSOR = "price_sensor"
@@ -36,6 +40,10 @@ CONF_PRICE_SENSOR = "price_sensor"
 # (or 96 dicts in ``data``). The state itself is the *current* quarter
 # price, not the average — today_avg is computed from the quarters.
 CONF_PRICE_TODAY_SENSOR = "price_today_sensor"
+# Tomorrow's quarter prices, same format as the "today" sensor. Lets the
+# hot-water planner compare tonight against tomorrow morning; without it the
+# planner assumes tomorrow looks like today.
+CONF_PRICE_TOMORROW_SENSOR = "price_tomorrow_sensor"
 
 # Weather (recommended)
 CONF_WEATHER_FORECAST_ENTITY = "weather_forecast_entity"
@@ -59,6 +67,9 @@ CONF_LEGIONELLA_DURATION_HOURS = "legionella_duration_hours"
 # Not part of the config flow — used only as the NumberDef key so the entity
 # seeds from DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C on first install.
 CONF_HW_AUX_GUARD_OUTDOOR_THRESHOLD = "hw_aux_guard_outdoor_threshold"
+# Same pattern for the hot-water planner numbers.
+CONF_HW_SHOWERS_PER_DAY = "hw_showers_per_day"
+CONF_HW_SHOWERS_PER_TANK = "hw_showers_per_tank"
 
 # ---------------------------------------------------------------------------
 # Default values (mirror v1's input_number defaults so behaviour ports 1:1)
@@ -71,6 +82,8 @@ DEFAULT_LEGIONELLA_MIN_DAYS = 6
 DEFAULT_LEGIONELLA_MAX_DAYS = 10
 DEFAULT_LEGIONELLA_DURATION_HOURS = 2
 DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C = -5  # °C, integer
+DEFAULT_HW_SHOWERS_PER_DAY = 2   # showers the household wants available per day
+DEFAULT_HW_SHOWERS_PER_TANK = 2  # showers one full tank delivers
 
 # Passive legionella detection — credit a pasteurization event whenever the
 # hot-water tank reaches LEGIONELLA_PASSIVE_THRESHOLD_C and sustains it for
@@ -201,6 +214,10 @@ HW_MODE_MIDDAY_BOOST = "Mid-day Boost"
 HW_MODE_LEGIONELLA_BOOST = "Legionella Boost"
 HW_MODE_HEATING_PRIORITY = "Heating Priority"
 HW_MODE_PRICE_PEAK_REDUCTION = "Price Peak Reduction"
+# Hot-water planner modes (only used while the Hot Water Planner switch is on).
+HW_MODE_SHOWER_RESERVE = "Shower Reserve"
+HW_MODE_PLANNED_PRODUCTION = "Planned Production"
+HW_MODE_SHOWER_REFILL = "Shower Refill"
 
 HW_MODES: tuple[str, ...] = (
     HW_MODE_DEFAULT,
@@ -209,6 +226,9 @@ HW_MODES: tuple[str, ...] = (
     HW_MODE_LEGIONELLA_BOOST,
     HW_MODE_HEATING_PRIORITY,
     HW_MODE_PRICE_PEAK_REDUCTION,
+    HW_MODE_SHOWER_RESERVE,
+    HW_MODE_PLANNED_PRODUCTION,
+    HW_MODE_SHOWER_REFILL,
 )
 
 # Pump-activity sensor states the controller reasons over.
@@ -316,6 +336,103 @@ HW_AUX_GUARD_EVENT_MIN_INTERVAL_SECONDS = 60
 # over-weight "not heating" in heating_duration_last_hour. Samples closer
 # than this to the previous one are skipped (the cycle still runs in full).
 ROLLING_SAMPLE_MIN_SPACING_SECONDS = 240
+
+# ---------------------------------------------------------------------------
+# Hot-water planner — showers per day instead of a fixed setpoint.
+# See hw_planner.py for the design; numbers below come from 41 days of RX95
+# data (1 Oct - 11 Nov 2026) unless stated otherwise.
+# ---------------------------------------------------------------------------
+# --- Tapping detection (tank sensor sits low in the tank) -------------------
+# A tapping starts when the tank temperature falls at least this fast between
+# two consecutive readings, and continues while it keeps falling faster than
+# the second rate. Standby loss is about -0.005 °C/min, real showers measured
+# -1 to -3.6 °C/min, so the gap between the two is wide.
+HW_DRAW_START_C_PER_MIN = -0.25
+HW_DRAW_CONTINUE_C_PER_MIN = -0.08
+# Readings further apart than this are not compared (sensor outage).
+HW_DRAW_MAX_SAMPLE_GAP_MINUTES = 20
+# With no new reading for this long, an open tapping is closed.
+HW_DRAW_CLOSE_AFTER_MINUTES = 10
+# Total drop: below MIN it is noise, SHORT counts as half a shower, SHOWER as
+# a whole one (median real shower: 50 -> 22 °C in 12 min).
+HW_DRAW_MIN_DROP_C = 3.0
+HW_DRAW_SHORT_DROP_C = 6.0
+HW_DRAW_SHOWER_DROP_C = 15.0
+# A tapping that starts with the sensor already lukewarm (a tank that has
+# cooled since the night's fill, or sits at reserve level) can not fall 15 °C.
+# Ending this cold after a clear drop means the cold front passed the sensor
+# all the same, so it counts as a whole shower.
+HW_DRAW_COLD_END_C = 35.0
+HW_DRAW_COLD_MIN_DROP_C = 5.0
+# Tappings kept for the hourly profile.
+HW_EVENT_HISTORY_DAYS = 60
+#
+# --- The shower day ----------------------------------------------------------
+# Showers are counted per day starting at this local hour (a shower after
+# midnight belongs to the evening before).
+HW_DAY_START_HOUR = 4
+# "Ready by": the daily fill must be done at the hour before which fewer than
+# EARLY_SHARE of the household's showers have historically started. Until
+# MIN_EVENTS showers are known the default applies.
+HW_READY_HOUR_DEFAULT = 6
+HW_READY_HOUR_MIN = HW_DAY_START_HOUR
+HW_READY_HOUR_MAX = 16
+HW_READY_EARLY_SHARE = 0.05
+HW_PROFILE_MIN_EVENTS = 8
+#
+# --- Tank model -------------------------------------------------------------
+# The tank counts as full when the (bottom) sensor is within this of the
+# default hot-water temperature. The pump typically stops ~1 °C short of its
+# setpoint, sometimes 3-4.
+HW_FULL_BELOW_DEFAULT_C = 5.0
+# Sensor this far below default with no tapping recorded: the cold front has
+# passed the sensor anyway (many small tappings), so one shower is gone.
+HW_DEPLETED_BELOW_DEFAULT_C = 15.0
+# Standby loss is ~7 °C per day. Water older than STALE no longer counts as a
+# shower; a daily fill is planned when the last fill would be older than
+# MAX_AGE_AT_READY when the shower day starts (so it lasts the evening).
+HW_STALE_AFTER_HOURS = 36
+HW_FILL_MAX_AGE_AT_READY_HOURS = 20
+# Setpoint between productions. The pump's own minimum: it tops up as rarely
+# as possible, and after a shower it only lifts the cold bottom to here.
+HW_RESERVE_TEMP_C = 30.0
+# Free energy: with PV excess the tank is heated this far above default.
+HW_PV_BOOST_C = 5.0
+#
+# --- Production planning ----------------------------------------------------
+# Reheat speed at the sensor: median 0.18 °C/min (range 0.09-0.7).
+HW_HEAT_RATE_C_PER_MIN = 0.18
+HW_PRODUCTION_MARGIN_MINUTES = 15
+HW_PRODUCTION_MIN_MINUTES = 30
+HW_PRODUCTION_MAX_MINUTES = 180
+# A production that neither completes nor stops on its own is let go.
+HW_PRODUCTION_TIMEOUT_HOURS = 4
+# Pump out of hot-water mode this long during a production = it stopped by
+# itself. If the tank is not full by then, wait before trying again.
+HW_EARLY_STOP_GRACE_MINUTES = 15
+HW_EARLY_STOP_BLOCK_MINUTES = 30
+# Pump never entered hot-water mode this long after the setpoint was raised.
+# Longer than MODE_REENTRY_COOLDOWN_SECONDS: the anti-flap layer may hold the
+# raised setpoint back that long, and that is not the pump refusing.
+HW_NO_START_MINUTES = 25
+#
+# --- Keeping the elpatron out of hot water ----------------------------------
+# 55 of 58 hot-water runs that used the elpatron (39 of 41 kWh) started within
+# 20 min of the compressor running at maximum speed for space heating. The
+# planner therefore does not *start* a production then.
+HW_STRAIN_LOAD_PCT = 97.0
+HW_STRAIN_LOOKBACK_MINUTES = 20
+# ...nor within this long after the elpatron itself was on.
+HW_STRAIN_AUX_LOOKBACK_MINUTES = 15
+# But not forever: a wanted production waits at most this long, and never
+# when the tank is empty and a shower is due.
+HW_MAX_DEFER_HOURS = 6
+# Elpatron seen during a planned production: stop it and try again later, at
+# most this many times per fill.
+HW_AUX_ABORT_BLOCK_MINUTES = 45
+HW_MAX_AUX_ABORTS = 2
+# Away: no showers are planned until this long before the vacation ends.
+HW_VACATION_PREPARE_HOURS = 8
 
 # Day-half boundary (v1: current_hour < 12 ⇒ AM).
 AM_BOUNDARY_HOUR = 12

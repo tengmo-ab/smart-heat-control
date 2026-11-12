@@ -39,6 +39,10 @@ class HwMode(StrEnum):
     LEGIONELLA_BOOST = "Legionella Boost"
     HEATING_PRIORITY = "Heating Priority"
     PRICE_PEAK_REDUCTION = "Price Peak Reduction"
+    # Hot-water planner (hw_planner.py)
+    SHOWER_RESERVE = "Shower Reserve"
+    PLANNED_PRODUCTION = "Planned Production"
+    SHOWER_REFILL = "Shower Refill"
 
 
 class PumpActivity(StrEnum):
@@ -106,6 +110,10 @@ class Inputs:
     # Tuple of exactly 96 floats (index 0 = 00:00 local, 95 = 23:45 local).
     # Empty tuple means the attribute was missing or malformed.
     price_quarters: tuple[float, ...] = field(default_factory=tuple)
+    # Tomorrow's quarter prices in the same format, once published (the
+    # hot-water planner compares tonight against tomorrow morning). Empty
+    # tuple = not bound or not published yet.
+    price_quarters_tomorrow: tuple[float, ...] = field(default_factory=tuple)
     # Recent average — from an external statistics sensor (or None if unbound).
     # Represents electricity cost over the last ~7 days; used to detect whether
     # the current price is cheap even by historical standards.
