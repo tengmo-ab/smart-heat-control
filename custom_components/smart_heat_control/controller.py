@@ -74,6 +74,10 @@ def decide(
     hot_water = _decide_hot_water(inputs, computed, climate.mode)
     if hw_plan is not None and hw_plan.active:
         hot_water = _apply_hw_plan(inputs, computed, hot_water, hw_plan, trace)
+    elif hw_plan is not None and hw_plan.enabled:
+        # Planner on but no tank reading: hold the setpoint where it is.
+        trace.append("hw:planner:no_tank_temp")
+        hot_water = HwDecision(mode=hw_plan.mode, target_temp=None)
 
     start_legionella = _should_start_legionella(inputs, computed, climate, hw_plan)
     if start_legionella:
@@ -622,7 +626,7 @@ def _should_start_legionella(
         return False
     if climate.mode == Mode.PRICE_PEAK_REDUCTION:
         return False
-    if hw_plan is not None and hw_plan.active:
+    if hw_plan is not None and hw_plan.enabled:
         good_moment = (
             hw_plan.state == "producing"
             and hw_plan.mode == HwMode.PLANNED_PRODUCTION

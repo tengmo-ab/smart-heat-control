@@ -372,9 +372,14 @@ class ShowerTracker:
 
 @dataclass(frozen=True, slots=True)
 class HwPlan:
-    """One cycle's hot-water plan. ``active`` False = bookkeeping only (the
-    planner switch is off or the tank temperature is unknown) and the legacy
-    cascade decides the setpoint."""
+    """One cycle's hot-water plan.
+
+    ``enabled`` = the planner switch (and Master) is on. ``active`` = enabled
+    and the tank temperature is known, so the plan decides the setpoint.
+    Enabled but not active (tank sensor not loaded yet after a restart, or
+    unavailable) means: leave the setpoint alone — not fall back to the v1
+    cascade, which could start a hot-water run at 45-55 °C.
+    """
 
     active: bool
     mode: HwMode
@@ -398,6 +403,7 @@ class HwPlan:
     # of tomorrow taken from today's prices, None = no prices (latest start).
     price_basis: str | None = None
     strained: bool = False
+    enabled: bool = False
     deferred_since: datetime | None = None
     blocked_until: datetime | None = None
     producing_since: datetime | None = None
@@ -561,6 +567,7 @@ class HwPlanner:
         def plan(mode: HwMode, target: float, state: str, reason: str, **extra: Any) -> HwPlan:
             return HwPlan(
                 active=enabled and tank_temp is not None,
+                enabled=enabled,
                 mode=mode,
                 target_temp=target,
                 state=state,
