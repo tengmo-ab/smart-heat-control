@@ -75,7 +75,7 @@ def decide(
     if hw_plan is not None and hw_plan.active:
         hot_water = _apply_hw_plan(inputs, computed, hot_water, hw_plan, trace)
 
-    start_legionella = _should_start_legionella(inputs, computed, climate)
+    start_legionella = _should_start_legionella(inputs, computed, climate, hw_plan)
     if start_legionella:
         hot_water = HwDecision(mode=HwMode.LEGIONELLA_BOOST, target_temp=min(60.0, MAX_HW_TEMP))
 
@@ -593,6 +593,7 @@ def _should_start_legionella(
     inputs: Inputs,
     computed: Computed,
     climate: ClimateDecision,
+    hw_plan: HwPlan | None = None,
 ) -> bool:
     """Determine whether to start a new legionella boost cycle this tick.
 
@@ -605,6 +606,13 @@ def _should_start_legionella(
         - current_main_mode != 'Price Peak Reduction'
         - days_since_legionella >= max_legionella_days OR is_current_hour_cheap_or_avg
         - current hw setpoint < 60.0  (extra guard inside the then-block)
+
+    With the hot-water planner active, "cheap or average right now" is
+    replaced by "the planner's daily fill is running": the boost rides on the
+    fill in the cheapest window instead of starting on any cheap-ish quarter
+    — e.g. 21:48 straight after an evening shower, reheating a cold tank to
+    60 °C on the elpatron at evening prices. The max-days rule still forces
+    a boost when no fill has been needed for that long.
     """
     if not inputs.legionella_boost_enabled:
         return False
@@ -614,9 +622,16 @@ def _should_start_legionella(
         return False
     if climate.mode == Mode.PRICE_PEAK_REDUCTION:
         return False
+    if hw_plan is not None and hw_plan.active:
+        good_moment = (
+            hw_plan.state == "producing"
+            and hw_plan.mode == HwMode.PLANNED_PRODUCTION
+        )
+    else:
+        good_moment = computed.is_current_hour_cheap_or_avg
     if not (
         computed.days_since_legionella >= inputs.legionella_max_days
-        or computed.is_current_hour_cheap_or_avg
+        or good_moment
     ):
         return False
     # Guard: don't re-trigger if setpoint already at 60
