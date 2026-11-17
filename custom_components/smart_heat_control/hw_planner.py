@@ -21,15 +21,17 @@ otherwise left alone:
                          shower the pump only lifts the cold bottom to here.
     Planned Production   the daily fill: cheapest window of quarter prices
                          that ends before the shower day starts.
-    Shower Refill        showers are still due today and the tank cannot
-                         cover them (e.g. 4 a day from a tank that holds 2).
+                         Also the top-up before the evening (see below).
+    Shower Refill        a shower is due today and the tank holds less than
+                         half of one (after a shower from a lukewarm tank, or
+                         4 a day from a tank that holds 2).
     Mid-day Boost        PV excess: free energy, heat above default.
 
 Two parts:
 
 * ``ShowerTracker`` — recognises tappings in the tank temperature, keeps the
-  history (for the hour-of-day profile) and the tank bookkeeping (showers used
-  since the tank was last full). Persisted by the coordinator.
+  history (for the hour-of-day profile) and the tank model (how many showers
+  the tank holds right now). Persisted by the coordinator.
 * ``HwPlanner`` — the per-cycle decision plus the latches around a running
   production. Runtime-only.
 
@@ -41,6 +43,30 @@ showers have started (learned from the tappings, 06:00 until enough are
 known). Between 04:00 and that hour the tank only has to cover what is still
 due today; from then on a tank that cannot cover it is refilled at once, and
 otherwise the next fill is planned for tomorrow's "ready by".
+
+How many showers are in the tank
+--------------------------------
+Counting tappings alone is not enough: a tank that was filled to 50 °C in the
+morning has cooled to 45-46 °C by the evening, and that is one shower, not
+two. So the tank is modelled, from the one sensor low in it:
+
+* Nothing tapped since it was last heated through: the tank is one body of
+  water at the sensor temperature, and holds ``capacity(temperature)`` — the
+  full number of showers at the default hot-water temperature, none at 40 °C,
+  linear in between. Standby loss shows up by itself.
+* After a tapping the cold front has reached the sensor and the sensor says
+  little about the hot water above it. That water is taken to be at the
+  temperature the tapping started from (less standby loss), and the tappings
+  since are subtracted from what it held.
+* Heated back to that temperature, or to full: one body of water again.
+
+With showers still due today, a tank that no longer *covers* them (is more
+than half a shower short) is topped up in the cheapest window of the three
+hours before the next hour in which the household usually showers — in such
+an hour: at once. A tank holding less than half a shower is refilled at once,
+and that is not held back by a busy compressor. After the day's last shower
+hour nothing more is made for today.
+Between 04:00 and the ready-by hour only the daily fill applies.
 
 Keeping the elpatron out
 ------------------------
@@ -61,6 +87,8 @@ from typing import Any
 from .const import (
     HW_AUX_ABORT_BLOCK_MINUTES,
     HW_AUX_GUARD_AUX_ON_W,
+    HW_COMPLETE_BELOW_TARGET_C,
+    HW_COVER_SHORT_SHOWERS,
     HW_DAY_START_HOUR,
     HW_DEPLETED_BELOW_DEFAULT_C,
     HW_DRAW_CLOSE_AFTER_MINUTES,
@@ -75,9 +103,10 @@ from .const import (
     HW_EARLY_STOP_BLOCK_MINUTES,
     HW_EARLY_STOP_GRACE_MINUTES,
     HW_EVENT_HISTORY_DAYS,
-    HW_FILL_MAX_AGE_AT_READY_HOURS,
+    HW_FILL_WINDOW_HOURS,
     HW_FULL_BELOW_DEFAULT_C,
     HW_HEAT_RATE_C_PER_MIN,
+    HW_LOW_TANK_SHOWERS,
     HW_MAX_AUX_ABORTS,
     HW_MAX_DEFER_HOURS,
     HW_NO_START_MINUTES,
@@ -92,7 +121,13 @@ from .const import (
     HW_READY_HOUR_MAX,
     HW_READY_HOUR_MIN,
     HW_RESERVE_TEMP_C,
+    HW_SETTLED_C_PER_MIN,
+    HW_SHOWER_HOUR_SHARE,
     HW_STALE_AFTER_HOURS,
+    HW_STANDBY_LOSS_C_PER_HOUR,
+    HW_TOP_REACHED_C,
+    HW_TOP_UP_WINDOW_HOURS,
+    HW_USABLE_MIN_TEMP_C,
     HW_VACATION_PREPARE_HOURS,
     MAX_HW_TEMP,
     QUARTERS_PER_DAY,
@@ -106,8 +141,17 @@ _QUARTER = timedelta(minutes=15)
 # A reading this much above the previous one means the tank is being heated;
 # less is sensor flicker during standby.
 _HEATED_MIN_RISE_C = 0.3
-# Standby loss, for telling a tapping from plain cooling across a sensor gap.
-_STANDBY_LOSS_C_PER_HOUR = 0.3
+
+
+def tank_capacity(temp: float, showers_per_tank: float, default_hw_temp: float) -> float:
+    """Showers a tank of evenly ``temp`` warm water delivers.
+
+    ``showers_per_tank`` at the default hot-water temperature (hotter water is
+    not credited further), nothing at HW_USABLE_MIN_TEMP_C, linear in between.
+    """
+    floor = min(HW_USABLE_MIN_TEMP_C, default_hw_temp - 5.0)
+    share = (temp - floor) / (default_hw_temp - floor)
+    return showers_per_tank * min(1.0, max(0.0, share))
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +197,7 @@ class Draw:
 
 
 class ShowerTracker:
-    """Tapping detector, tapping history and tank bookkeeping.
+    """Tapping detector, tapping history and tank model.
 
     Feed it every *changed* tank reading via ``note_temp``. The detection was
     validated on change-based history, so repeated identical readings should
@@ -166,16 +210,23 @@ class ShowerTracker:
         # many small tappings): (when noticed, shower equivalents). Counted
         # as showers taken, kept out of the hourly profile.
         self.untimed: list[tuple[datetime, float]] = []
-        # Shower equivalents drawn since the tank was last full.
+        # Shower equivalents drawn since the tank was last one body of water
+        # (heated through, see _update_tank). Zero = the sensor speaks for the
+        # whole tank.
         self.used_since_full: float = 0.0
         # Last time the tank was *heated* to full (rising reading at or above
         # the full level) — not the last time it merely still was that warm.
         self.last_full_at: datetime | None = None
+        # (when, temperature) the hot water at the top was last known: every
+        # reading while nothing has been tapped, frozen at the start of the
+        # first tapping after that.
+        self._hot: tuple[datetime, float] | None = None
         # Set whenever something worth persisting changed.
         self.dirty: bool = False
         self._prev: tuple[datetime, float] | None = None
         self._open: tuple[datetime, float] | None = None
         self._ready_hour: tuple[Any, int] | None = None
+        self._shower_hours: tuple[Any, tuple[int, ...] | None] | None = None
 
     # -- feeding -----------------------------------------------------------
 
@@ -185,6 +236,7 @@ class ShowerTracker:
         """Take one reading; return the tapping it closed, if any."""
         closed: Draw | None = None
         rising = False
+        tapping = False
         prev = self._prev
         if prev is not None:
             minutes = (when - prev[0]).total_seconds() / 60
@@ -193,6 +245,7 @@ class ShowerTracker:
             rate = (temp - prev[1]) / minutes
             rising = temp >= prev[1] + _HEATED_MIN_RISE_C
             comparable = minutes <= HW_DRAW_MAX_SAMPLE_GAP_MINUTES
+            tapping = comparable and rate < HW_SETTLED_C_PER_MIN
             if self._open is not None:
                 if not (comparable and rate <= HW_DRAW_CONTINUE_C_PER_MIN):
                     closed = self._close()
@@ -201,7 +254,7 @@ class ShowerTracker:
             elif not comparable:
                 self._account_unobserved(prev, when, temp)
         self._prev = (when, temp)
-        self._update_tank(when, temp, default_hw_temp, rising or prev is None)
+        self._update_tank(when, temp, default_hw_temp, rising or prev is None, tapping)
         return closed
 
     def flush(self, now: datetime) -> Draw | None:
@@ -225,6 +278,7 @@ class ShowerTracker:
         self.events.append(draw)
         self.used_since_full += draw.showers
         self._ready_hour = None
+        self._shower_hours = None
         self._prune(draw.end)
         self.dirty = True
         return draw
@@ -235,7 +289,7 @@ class ShowerTracker:
         """A tapping during a sensor outage: book it, but keep it out of the
         hourly profile since nobody knows when it happened."""
         hours = (when - prev[0]).total_seconds() / 3600
-        ghost = Draw(prev[0], when, prev[1] - _STANDBY_LOSS_C_PER_HOUR * hours, temp)
+        ghost = Draw(prev[0], when, prev[1] - HW_STANDBY_LOSS_C_PER_HOUR * hours, temp)
         if ghost.showers > 0:
             self._book_untimed(when, ghost.showers)
 
@@ -245,18 +299,37 @@ class ShowerTracker:
         self.dirty = True
 
     def _update_tank(
-        self, when: datetime, temp: float, default_hw_temp: float, heated: bool
+        self,
+        when: datetime,
+        temp: float,
+        default_hw_temp: float,
+        heated: bool,
+        tapping: bool = False,
     ) -> None:
-        if temp >= default_hw_temp - HW_FULL_BELOW_DEFAULT_C:
+        full = temp >= default_hw_temp - HW_FULL_BELOW_DEFAULT_C
+        if full and (heated or self.last_full_at is None):
+            self.last_full_at = when
+            self.dirty = True
+        if self._open is not None:
+            return  # mid-tapping: the sensor is in the cold front
+        top = self.top_temp(when)
+        if (
+            full
+            or self.used_since_full <= 0.0
+            or top is None
+            or temp >= top - HW_TOP_REACHED_C
+        ):
+            # One body of water: the sensor speaks for the whole tank —
+            # except while a tapping is reaching it, which says nothing new
+            # about the top (and may turn out to be the start of a shower).
             if self.used_since_full:
                 self.used_since_full = 0.0
                 self.dirty = True
-            if heated or self.last_full_at is None:
-                self.last_full_at = when
-                self.dirty = True
-        elif (
-            self._open is None
-            and temp < default_hw_temp - HW_DEPLETED_BELOW_DEFAULT_C
+                self._hot = (when, temp)
+            elif not tapping or self._hot is None:
+                self._hot = (when, temp)
+        if (
+            temp < default_hw_temp - HW_DEPLETED_BELOW_DEFAULT_C
             and self.used_since_full < 1.0
         ):
             # Cold at the sensor without a whole shower recorded: many small
@@ -271,6 +344,54 @@ class ShowerTracker:
             self.untimed = [u for u in self.untimed if u[0] >= cutoff]
 
     # -- queries -------------------------------------------------------------
+
+    def top_temp(self, now: datetime) -> float | None:
+        """Estimated temperature of the hot water at the top of the tank."""
+        if self._hot is None:
+            return None
+        hours = max(0.0, (now - self._hot[0]).total_seconds() / 3600)
+        return self._hot[1] - HW_STANDBY_LOSS_C_PER_HOUR * hours
+
+    def available(
+        self,
+        now: datetime,
+        showers_per_tank: float,
+        default_hw_temp: float,
+        *,
+        sensor_temp: float | None = None,
+        ahead_hours: float = 0.0,
+    ) -> float:
+        """Showers the tank holds now — or ``ahead_hours`` from now if it is
+        left alone (standby loss only).
+
+        What the hot water at the top held when it was last known, less the
+        tappings since (an unfinished one included); never less than what the
+        sensor temperature alone accounts for, since the water above the
+        sensor is at least that warm. ``sensor_temp`` is the current reading
+        when the caller has it (else the last one fed).
+        """
+        if sensor_temp is None:
+            if self._prev is None:
+                return 0.0
+            sensor_temp = self._prev[1]
+        loss = HW_STANDBY_LOSS_C_PER_HOUR * max(0.0, ahead_hours)
+        by_sensor = tank_capacity(sensor_temp - loss, showers_per_tank, default_hw_temp)
+        top = self.top_temp(now)
+        if top is None:
+            # Stratified tank restored from a version without the tank model.
+            if self.last_full_at is None:
+                return by_sensor
+            hours = max(0.0, (now - self.last_full_at).total_seconds() / 3600)
+            top = default_hw_temp - HW_STANDBY_LOSS_C_PER_HOUR * hours
+        used = self.used_since_full + self.pending_showers()
+        by_count = tank_capacity(top - loss, showers_per_tank, default_hw_temp) - used
+        return max(0.0, by_count, by_sensor)
+
+    def pending_showers(self) -> float:
+        """Shower equivalents of the tapping in progress, as far as it has come."""
+        if self._open is None or self._prev is None:
+            return 0.0
+        return Draw(self._open[0], self._prev[0], self._open[1], self._prev[1]).showers
 
     def showers_since(self, start: datetime) -> float:
         return sum(e.showers for e in self.events if e.start >= start) + sum(
@@ -319,6 +440,24 @@ class ShowerTracker:
         self._ready_hour = (today, hour)
         return hour
 
+    def shower_hours(self, tz: tzinfo, now: datetime) -> tuple[int, ...] | None:
+        """Local hours of day in which the household usually showers.
+
+        Hours holding at least HW_SHOWER_HOUR_SHARE of the known showers;
+        None until enough are known. Recomputed once per local date and when
+        a new tapping arrives, like the ready hour.
+        """
+        today = now.astimezone(tz).date()
+        if self._shower_hours is not None and self._shower_hours[0] == today:
+            return self._shower_hours[1]
+        hours: tuple[int, ...] | None = None
+        if len([e for e in self.events if e.showers > 0]) >= HW_PROFILE_MIN_EVENTS:
+            profile = self.hourly_profile(tz)
+            limit = HW_SHOWER_HOUR_SHARE * sum(profile) - _EPS
+            hours = tuple(h for h, showers in enumerate(profile) if showers >= limit)
+        self._shower_hours = (today, hours)
+        return hours
+
     # -- persistence ---------------------------------------------------------
 
     def as_dict(self) -> dict[str, Any]:
@@ -328,6 +467,7 @@ class ShowerTracker:
             "used_since_full": self.used_since_full,
             "last_full_at": self.last_full_at.isoformat() if self.last_full_at else None,
             "prev": [self._prev[0].isoformat(), self._prev[1]] if self._prev else None,
+            "hot": [self._hot[0].isoformat(), self._hot[1]] if self._hot else None,
         }
 
     def restore(self, data: dict[str, Any] | None) -> None:
@@ -362,8 +502,16 @@ class ShowerTracker:
             self._prev = (datetime.fromisoformat(prev[0]), float(prev[1])) if prev else None
         except (ValueError, TypeError, IndexError):
             self._prev = None
+        try:
+            hot = data.get("hot")
+            self._hot = (datetime.fromisoformat(hot[0]), float(hot[1])) if hot else None
+        except (ValueError, TypeError, IndexError):
+            self._hot = None
+        if self._hot is None and self.used_since_full <= 0.0:
+            self._hot = self._prev
         self._open = None
         self._ready_hour = None
+        self._shower_hours = None
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +532,7 @@ class HwPlan:
     active: bool
     mode: HwMode
     target_temp: float
-    state: str      # reserve / waiting / producing / refilling / deferred / pv_boost / paused / away / disabled
+    state: str      # reserve / waiting / producing / topping_up / refilling / deferred / pv_boost / paused / away / disabled
     reason: str
     showers_per_day: int
     showers_per_tank: float
@@ -399,6 +547,9 @@ class HwPlan:
     planned_end: datetime | None = None
     latest_start: datetime | None = None
     estimated_minutes: int | None = None
+    # What the planned window is for: "fill" (the daily one), "top_up" or
+    # "refill"; None when nothing is planned.
+    planned_kind: str | None = None
     # "actual" = real quarter prices for the whole horizon, "assumed" = part
     # of tomorrow taken from today's prices, None = no prices (latest start).
     price_basis: str | None = None
@@ -408,6 +559,10 @@ class HwPlan:
     blocked_until: datetime | None = None
     producing_since: datetime | None = None
     last_result: str | None = None
+    # Estimated temperature of the hot water at the top of the tank.
+    top_temp: float | None = None
+    # Local hours in which the household usually showers (None = not known).
+    shower_hours: tuple[int, ...] | None = None
 
 
 def production_minutes(tank_temp: float, target_temp: float) -> int:
@@ -423,9 +578,11 @@ def cheapest_window(
     minutes: int,
     prices_today: tuple[float, ...],
     prices_tomorrow: tuple[float, ...],
+    earliest: datetime | None = None,
 ) -> tuple[datetime, datetime, str | None]:
     """Cheapest run of ``minutes`` between now and ``deadline`` (local times).
 
+    ``earliest`` (on a quarter) keeps the run from starting before that time.
     Returns (latest_start, planned_start, price_basis). Without usable prices
     the plan is to start as late as possible: least standby loss, and the
     hours before a morning deadline are usually the cheap ones anyway.
@@ -434,6 +591,7 @@ def cheapest_window(
     latest_start = deadline - quarters * _QUARTER
     if len(prices_today) != QUARTERS_PER_DAY:
         return latest_start, latest_start, None
+    begin = now if earliest is None or earliest <= now else earliest
 
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     slots: list[tuple[datetime, float]] = []
@@ -443,6 +601,9 @@ def cheapest_window(
         start = midnight + index * _QUARTER
         if start >= deadline:
             break
+        if start + _QUARTER <= begin:
+            index += 1
+            continue
         if index < QUARTERS_PER_DAY:
             price = prices_today[index]
         elif index < 2 * QUARTERS_PER_DAY:
@@ -457,7 +618,7 @@ def cheapest_window(
         index += 1
 
     if len(slots) <= quarters:
-        return latest_start, now, basis
+        return latest_start, begin, basis
     best_start, best_cost = 0, math.inf
     running = sum(price for _, price in slots[:quarters])
     for first in range(len(slots) - quarters + 1):
@@ -468,6 +629,19 @@ def cheapest_window(
     return latest_start, slots[best_start][0], basis
 
 
+_KIND_STATE = {"fill": "producing", "top_up": "topping_up", "refill": "refilling"}
+_KIND_REASON = {
+    "fill": "Daily fill in the cheapest window",
+    "top_up": "Top-up before the usual shower hours",
+    "refill": "Refilling: a shower is due and the tank is nearly empty",
+}
+
+
+def _covers(available: float, need: float) -> bool:
+    """Does a tank holding ``available`` showers cover ``need`` of them?"""
+    return available + _EPS >= need - HW_COVER_SHORT_SHOWERS
+
+
 class HwPlanner:
     """Per-cycle decision and the latches around a running production."""
 
@@ -475,6 +649,8 @@ class HwPlanner:
         self.producing_since: datetime | None = None
         self.producing_mode: HwMode | None = None
         self.producing_target: float | None = None
+        # "fill" / "top_up" / "refill" while a production runs.
+        self.producing_kind: str | None = None
         self.deferred_since: datetime | None = None
         self.blocked_until: datetime | None = None
         self.aux_aborts: int = 0
@@ -489,6 +665,7 @@ class HwPlanner:
         self.producing_since = None
         self.producing_mode = None
         self.producing_target = None
+        self.producing_kind = None
         self.deferred_since = None
         self.blocked_until = None
         self.aux_aborts = 0
@@ -545,12 +722,25 @@ class HwPlanner:
         )
         per_day = 0 if away else max(0, int(showers_per_day))
         capacity = max(1.0, float(showers_per_tank))
-        taken = tracker.showers_since(day_start)
-        stale = tracker.last_full_at is not None and (
-            now - tracker.last_full_at >= timedelta(hours=HW_STALE_AFTER_HOURS)
-        )
-        available = 0.0 if stale else max(0.0, capacity - tracker.used_since_full)
+        target = min(default_hw_temp, MAX_HW_TEMP)
+        # A shower in progress counts on both sides: taken, and gone from
+        # the tank (see ShowerTracker.available).
+        taken = tracker.showers_since(day_start) + tracker.pending_showers()
+
+        def holds(ahead_hours: float = 0.0) -> float:
+            """Showers in the tank now, or that far ahead if left alone."""
+            if tracker.last_full_at is not None and (
+                now + timedelta(hours=ahead_hours) - tracker.last_full_at
+                >= timedelta(hours=HW_STALE_AFTER_HOURS)
+            ):
+                return 0.0
+            return tracker.available(
+                now, capacity, target, sensor_temp=tank_temp, ahead_hours=ahead_hours
+            )
+
+        available = holds()
         need_now = min(capacity, max(0.0, per_day - taken))
+        shower_hours = tracker.shower_hours(tz, now)
 
         common: dict[str, Any] = {
             "showers_per_day": per_day,
@@ -562,6 +752,8 @@ class HwPlanner:
             "day_start": day_start,
             "ready_by": ready_by,
             "strained": strained,
+            "top_temp": tracker.top_temp(now),
+            "shower_hours": shower_hours,
         }
 
         def plan(mode: HwMode, target: float, state: str, reason: str, **extra: Any) -> HwPlan:
@@ -588,48 +780,89 @@ class HwPlanner:
                 fill_needed=False,
             )
 
-        target = min(default_hw_temp, MAX_HW_TEMP)
         full_c = default_hw_temp - HW_FULL_BELOW_DEFAULT_C
         # What the tank must hold at ready_by: today's remaining showers if
         # that is still ahead, else a fresh day's worth for tomorrow.
         ready_need = need_now if before_ready else min(capacity, float(per_day))
-        # Showers are due now and the tank cannot cover them → refill at once.
-        shortage = per_day > 0 and not before_ready and available + _EPS < need_now
+        # The daily fill: needed when the tank, left alone, would not cover
+        # that at ready_by — unless it was filled for this very morning and
+        # nothing has been tapped since.
+        filled_for_ready = (
+            tracker.used_since_full <= 0.0
+            and tracker.last_full_at is not None
+            and ready_by - tracker.last_full_at <= timedelta(hours=HW_FILL_WINDOW_HOURS)
+        )
         fill_needed = (
             per_day > 0
             and tank_temp < full_c
-            and (
-                available + _EPS < ready_need
-                or tracker.last_full_at is None
-                or ready_by - tracker.last_full_at
-                > timedelta(hours=HW_FILL_MAX_AGE_AT_READY_HOURS)
+            and not filled_for_ready
+            and not _covers(
+                holds((ready_by - local).total_seconds() / 3600), ready_need
             )
+        )
+        # Showers are due today, the tank does not cover them, and an hour
+        # the household usually showers in is still ahead. Nearly empty:
+        # refill at once. Otherwise: top up in the cheapest window before
+        # that hour.
+        short = (
+            per_day > 0
+            and not before_ready
+            and need_now > _EPS
+            and not _covers(available, need_now)
+        )
+        low = short and available + _EPS < HW_LOW_TANK_SHOWERS
+        heat_by = (
+            self._next_shower_hour(local, day_start, shower_hours)
+            if short and (low or tank_temp < full_c)
+            else None
         )
 
         window: dict[str, Any] = {"fill_needed": fill_needed}
-        past_latest = False
-        start_now = False
-        if fill_needed or shortage:
+        fill_past_latest = False
+        start_fill = False
+        start_heat = False
+        urgent = low and heat_by is not None
+        if fill_needed or heat_by is not None:
             minutes = production_minutes(tank_temp, target)
+            window["estimated_minutes"] = minutes
+        if fill_needed:
             latest_start, planned_start, basis = cheapest_window(
-                local, ready_by, minutes, prices_today, prices_tomorrow
+                local, ready_by, minutes, prices_today, prices_tomorrow,
+                earliest=ready_by - timedelta(hours=HW_FILL_WINDOW_HOURS),
             )
-            past_latest = local >= latest_start
-            start_now = planned_start <= local or past_latest
+            fill_past_latest = local >= latest_start
+            start_fill = planned_start <= local or fill_past_latest
+            begin = local if start_fill else planned_start
             window.update(
-                estimated_minutes=minutes,
-                price_basis=basis,
-                latest_start=latest_start,
+                planned_kind="fill", price_basis=basis, latest_start=latest_start,
+                planned_start=begin, planned_end=begin + timedelta(minutes=minutes),
             )
-            if not shortage:
-                begin = local if start_now else planned_start
-                window.update(planned_start=begin, planned_end=begin + timedelta(minutes=minutes))
-        # Tank empty and a shower is due (or the daily fill can wait no
-        # longer): comfort wins over every gate below.
-        critical = (
-            per_day > 0
-            and available < 1.0 - _EPS
-            and (shortage or (past_latest and available + _EPS < ready_need))
+        if urgent:
+            start_heat = True
+            window.update(
+                planned_kind="refill", price_basis=None, latest_start=None,
+                planned_start=local, planned_end=local + timedelta(minutes=minutes),
+            )
+        elif heat_by is not None and not start_fill:
+            latest_start, planned_start, basis = cheapest_window(
+                local, heat_by, minutes, prices_today, prices_tomorrow,
+                earliest=heat_by - timedelta(hours=HW_TOP_UP_WINDOW_HOURS),
+            )
+            start_heat = planned_start <= local or local >= latest_start
+            begin = local if start_heat else planned_start
+            window.update(
+                planned_kind="top_up", price_basis=basis, latest_start=latest_start,
+                planned_start=begin, planned_end=begin + timedelta(minutes=minutes),
+            )
+        # Tank nearly empty and a shower is due (or the daily fill can wait
+        # no longer): comfort wins over every gate below.
+        critical = per_day > 0 and (
+            urgent
+            or (
+                fill_needed
+                and fill_past_latest
+                and available + _EPS < HW_LOW_TANK_SHOWERS
+            )
         )
         aux_on = aux_power_w is not None and aux_power_w >= HW_AUX_GUARD_AUX_ON_W
 
@@ -643,13 +876,16 @@ class HwPlanner:
             )
             if ended is None:
                 assert self.producing_mode is not None and self.producing_target is not None
-                refill = self.producing_mode == HwMode.SHOWER_REFILL
+                if urgent and self.producing_kind == "top_up":
+                    # A shower emptied the tank while it was being topped up.
+                    self.producing_kind = "refill"
+                    self.producing_mode = HwMode.SHOWER_REFILL
+                kind = self.producing_kind or "fill"
                 return plan(
                     self.producing_mode,
                     self.producing_target,
-                    "paused" if paused else ("refilling" if refill else "producing"),
-                    "Refilling: more showers are due today" if refill
-                    else "Daily fill in the cheapest window",
+                    "paused" if paused else _KIND_STATE[kind],
+                    _KIND_REASON[kind],
                     **window,
                 )
             _LOGGER.info("SHC hot-water planner: production ended (%s)", ended)
@@ -665,13 +901,15 @@ class HwPlanner:
             )
 
         # ---- Should a production start? ---------------------------------
-        wanted: HwMode | None = None
-        if shortage:
-            wanted = HwMode.SHOWER_REFILL
-        elif fill_needed and start_now:
-            wanted = HwMode.PLANNED_PRODUCTION
+        kind: str | None = None
+        if urgent:
+            kind = "refill"
+        elif start_fill:
+            kind = "fill"
+        elif start_heat:
+            kind = "top_up"
 
-        if wanted is not None and not paused:
+        if kind is not None and not paused:
             gate: str | None = None
             if not critical:
                 if self.blocked_until is not None:
@@ -690,25 +928,21 @@ class HwPlanner:
                 return plan(
                     HwMode.SHOWER_RESERVE, HW_RESERVE_TEMP_C, "deferred", gate, **window
                 )
+            mode = HwMode.SHOWER_REFILL if kind == "refill" else HwMode.PLANNED_PRODUCTION
             self.producing_since = now
-            self.producing_mode = wanted
+            self.producing_mode = mode
             self.producing_target = target
+            self.producing_kind = kind
             self.deferred_since = None
             self._hw_seen = now if pump == PumpActivity.HOT_WATER else None
             self._judge_from = None
-            refill = wanted == HwMode.SHOWER_REFILL
             _LOGGER.info(
                 "SHC hot-water planner: starting %s (taken %.1f of %d today, "
                 "%.1f available, tank %.1f °C)",
-                "refill" if refill else "daily fill", taken, per_day, available, tank_temp,
+                kind, taken, per_day, available, tank_temp,
             )
-            return plan(
-                wanted, target, "refilling" if refill else "producing",
-                "Refilling: more showers are due today" if refill
-                else "Daily fill in the cheapest window",
-                **window,
-            )
-        if wanted is None:
+            return plan(mode, target, _KIND_STATE[kind], _KIND_REASON[kind], **window)
+        if kind is None:
             self.deferred_since = None
         elif paused:
             return plan(
@@ -723,16 +957,40 @@ class HwPlanner:
                 min(default_hw_temp + HW_PV_BOOST_C, MAX_HW_TEMP),
                 "pv_boost", "PV excess: storing free energy", **window,
             )
+        if heat_by is not None:
+            return plan(
+                HwMode.SHOWER_RESERVE, HW_RESERVE_TEMP_C, "waiting",
+                "Top-up planned before the usual shower hours", **window,
+            )
         if fill_needed:
             return plan(
                 HwMode.SHOWER_RESERVE, HW_RESERVE_TEMP_C, "waiting",
                 "Daily fill planned for the cheapest window", **window,
             )
-        return plan(
-            HwMode.SHOWER_RESERVE, HW_RESERVE_TEMP_C, "reserve",
-            "Tank covers the showers due" if per_day > 0 else "No showers requested",
-            **window,
-        )
+        if per_day <= 0:
+            reason = "No showers requested"
+        elif short:
+            reason = "No more showers expected today"
+        else:
+            reason = "Tank covers the showers due"
+        return plan(HwMode.SHOWER_RESERVE, HW_RESERVE_TEMP_C, "reserve", reason, **window)
+
+    @staticmethod
+    def _next_shower_hour(
+        local: datetime, day_start: datetime, shower_hours: tuple[int, ...] | None
+    ) -> datetime | None:
+        """When the tank should be topped up by: now if this is an hour the
+        household usually showers in (or none are known yet), else the start
+        of the next such hour in this shower day; None when none is left."""
+        if shower_hours is None or local.hour in shower_hours:
+            return local
+        hour = local.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        day_end = day_start + timedelta(days=1)
+        while hour < day_end:
+            if hour.hour in shower_hours:
+                return hour
+            hour += timedelta(hours=1)
+        return None
 
     # ------------------------------------------------------------------
     # Internals
@@ -757,7 +1015,7 @@ class HwPlanner:
 
         if not wanted:
             return self._end(now, "cancelled")
-        if tank_temp >= self.producing_target - 1.0:
+        if tank_temp >= self.producing_target - HW_COMPLETE_BELOW_TARGET_C:
             return self._end(now, "completed")
         if aux_on and in_hw and not critical and self.aux_aborts < HW_MAX_AUX_ABORTS:
             self.aux_aborts += 1
@@ -789,6 +1047,7 @@ class HwPlanner:
         self.producing_since = None
         self.producing_mode = None
         self.producing_target = None
+        self.producing_kind = None
         self._hw_seen = None
         self._judge_from = None
         self.blocked_until = (

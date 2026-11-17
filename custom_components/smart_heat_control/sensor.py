@@ -264,6 +264,11 @@ class HotWaterPlannerSensor(
         if key == "hw_showers_available":
             return {
                 "showers_per_tank": plan.showers_per_tank,
+                # Estimated temperature of the hot water at the top of the
+                # tank; the sensor itself sits at the bottom.
+                "tank_top_temp": (
+                    round(plan.top_temp, 1) if plan.top_temp is not None else None
+                ),
                 "used_since_full": round(tracker.used_since_full, 1),
                 "tank_last_heated_full": _iso(tracker.last_full_at),
                 "showers_needed_now": round(plan.showers_needed_now, 1),
@@ -277,6 +282,10 @@ class HotWaterPlannerSensor(
                 "fill_needed": plan.fill_needed,
                 "ready_by": _iso(plan.ready_by),
                 "ready_hour": plan.ready_hour,
+                "shower_hours": (
+                    list(plan.shower_hours) if plan.shower_hours is not None else None
+                ),
+                "planned_kind": plan.planned_kind,
                 "planned_start": _iso(plan.planned_start),
                 "planned_end": _iso(plan.planned_end),
                 "latest_start": _iso(plan.latest_start),

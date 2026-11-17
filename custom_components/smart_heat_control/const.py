@@ -381,18 +381,53 @@ HW_READY_EARLY_SHARE = 0.05
 HW_PROFILE_MIN_EVENTS = 8
 #
 # --- Tank model -------------------------------------------------------------
-# The tank counts as full when the (bottom) sensor is within this of the
-# default hot-water temperature. The pump typically stops ~1 °C short of its
-# setpoint, sometimes 3-4.
-HW_FULL_BELOW_DEFAULT_C = 5.0
+# How many showers the tank holds follows its temperature, not only a count of
+# tappings: "Showers Per Full Tank" is what a tank at the default hot-water
+# temperature delivers, water at or below USABLE_MIN is no shower water at
+# all, and in between it is linear. With default 50 °C and 2 showers per tank
+# that is 0.2 shower per degree: 47.5 °C = 1.5, 45 °C = 1, 40 °C = 0.
+# (Steeper than plain mixing arithmetic on purpose: a lukewarm tank also loses
+# its tail to the mixing zone, and the household judges by the last minutes.)
+HW_USABLE_MIN_TEMP_C = 40.0
+# Standby loss of the hot water at the top while the sensor (bottom) no longer
+# shows it, i.e. after a tapping. Measured 0.25-0.4 °C/h at 45-50 °C.
+HW_STANDBY_LOSS_C_PER_HOUR = 0.3
+# The sensor falling faster than this is a tapping reaching it, not standby
+# loss (0.005 °C/min): the top of the tank is not that much colder for it.
+HW_SETTLED_C_PER_MIN = -0.02
+# After a tapping the tank is stratified and the bottom sensor says little
+# about the top. It is one body of water again once the sensor is back within
+# this of the estimated top temperature.
+HW_TOP_REACHED_C = 1.0
+# The tank counts as filled when the (bottom) sensor has been heated to within
+# this of the default hot-water temperature (the pump stops ~1 °C short).
+HW_FULL_BELOW_DEFAULT_C = 2.0
 # Sensor this far below default with no tapping recorded: the cold front has
 # passed the sensor anyway (many small tappings), so one shower is gone.
 HW_DEPLETED_BELOW_DEFAULT_C = 15.0
-# Standby loss is ~7 °C per day. Water older than STALE no longer counts as a
-# shower; a daily fill is planned when the last fill would be older than
-# MAX_AGE_AT_READY when the shower day starts (so it lasts the evening).
+# The tank "covers" a number of showers when it is at most this much short of
+# them — otherwise every tenth of a degree of standby loss would start the
+# pump, which is the v1 behaviour the planner exists to avoid. With 2 per tank
+# and 2 due that is 47.5 °C; and a shower taken from such a tank leaves just
+# enough to cover one more without reheating in the evening peak.
+HW_COVER_SHORT_SHOWERS = 0.5
+# Less than this in the tank with a shower due: refill at once.
+HW_LOW_TANK_SHOWERS = 0.5
+# Water older than this no longer counts as a shower at all.
 HW_STALE_AFTER_HOURS = 36
-HW_FILL_MAX_AGE_AT_READY_HOURS = 20
+# The daily fill is placed in the cheapest window within this long before the
+# ready-by hour, so it is still (nearly) a full tank when the day starts. A
+# fill done inside that window is not repeated for the same morning.
+HW_FILL_WINDOW_HOURS = 6
+# Top-ups: with showers still due today and a tank that has cooled below what
+# covers them, the tank is topped up before the next hour in which the
+# household usually showers — an hour that holds at least this share of the
+# known showers.
+HW_SHOWER_HOUR_SHARE = 0.08
+# A top-up is 0.2-0.4 kWh, so when it is made matters more than what the
+# quarter costs: made at lunch it is 2 °C down again by the evening. It goes
+# in the cheapest window within this long before the shower hour.
+HW_TOP_UP_WINDOW_HOURS = 3
 # Setpoint between productions. The pump's own minimum: it tops up as rarely
 # as possible, and after a shower it only lifts the cold bottom to here.
 HW_RESERVE_TEMP_C = 30.0
@@ -405,6 +440,9 @@ HW_HEAT_RATE_C_PER_MIN = 0.18
 HW_PRODUCTION_MARGIN_MINUTES = 15
 HW_PRODUCTION_MIN_MINUTES = 30
 HW_PRODUCTION_MAX_MINUTES = 180
+# A production is complete with the sensor this close to the target (the pump
+# may also stop on its own further down, see HW_EARLY_STOP_GRACE_MINUTES).
+HW_COMPLETE_BELOW_TARGET_C = 0.5
 # A production that neither completes nor stops on its own is let go.
 HW_PRODUCTION_TIMEOUT_HOURS = 4
 # Pump out of hot-water mode this long during a production = it stopped by
