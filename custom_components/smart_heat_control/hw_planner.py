@@ -127,6 +127,7 @@ from .const import (
     HW_STANDBY_LOSS_C_PER_HOUR,
     HW_TOP_REACHED_C,
     HW_TOP_UP_WINDOW_HOURS,
+    HW_UNTIMED_CLUSTER_MINUTES,
     HW_USABLE_MIN_TEMP_C,
     HW_VACATION_PREPARE_HOURS,
     MAX_HW_TEMP,
@@ -405,6 +406,30 @@ class ShowerTracker:
         for event in reversed(self.events):
             if event.showers > 0:
                 return event
+        return None
+
+    def last_shower_estimate(self) -> tuple[datetime, float, Draw | None] | None:
+        """(start, shower equivalents, tapping) of the latest shower.
+
+        Consumption booked without a recognisable tapping (a sensor outage
+        during a shower) counts too when it came after the last tapping: the
+        bookings within HW_UNTIMED_CLUSTER_MINUTES of each other are taken as
+        one shower, timed when the first was noticed (tapping None).
+        """
+        last = self.last_shower()
+        after = [
+            (when, showers) for when, showers in self.untimed
+            if showers > 0 and (last is None or when > last.end)
+        ]
+        if after:
+            first = len(after) - 1
+            while first > 0 and after[first][0] - after[first - 1][0] <= timedelta(
+                minutes=HW_UNTIMED_CLUSTER_MINUTES
+            ):
+                first -= 1
+            return after[first][0], sum(s for _, s in after[first:]), None
+        if last is not None:
+            return last.start, last.showers, last
         return None
 
     def hourly_profile(self, tz: tzinfo) -> list[float]:

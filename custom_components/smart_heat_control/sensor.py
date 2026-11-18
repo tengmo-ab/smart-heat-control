@@ -216,8 +216,8 @@ class HotWaterPlannerSensor(
     def native_value(self) -> Any:
         key = self._defn.key
         if key == "hw_last_shower":
-            last = self.coordinator._shower_tracker.last_shower()
-            return last.start if last is not None else None
+            last = self.coordinator._shower_tracker.last_shower_estimate()
+            return last[0] if last is not None else None
         plan = self._plan
         if plan is None:
             return None
@@ -234,14 +234,19 @@ class HotWaterPlannerSensor(
         key = self._defn.key
         tracker = self.coordinator._shower_tracker
         if key == "hw_last_shower":
-            last = tracker.last_shower()
-            if last is None:
+            estimate = tracker.last_shower_estimate()
+            if estimate is None:
                 return None
+            _, showers, draw = estimate
+            if draw is None:
+                # Seen only as a colder tank after a sensor outage.
+                return {"showers": showers, "estimated": True}
             return {
-                "minutes": round((last.end - last.start).total_seconds() / 60),
-                "from_c": last.from_c,
-                "to_c": last.to_c,
-                "showers": last.showers,
+                "minutes": round((draw.end - draw.start).total_seconds() / 60),
+                "from_c": draw.from_c,
+                "to_c": draw.to_c,
+                "showers": showers,
+                "estimated": False,
             }
         plan = self._plan
         if plan is None:

@@ -405,6 +405,9 @@ HW_FULL_BELOW_DEFAULT_C = 2.0
 # Sensor this far below default with no tapping recorded: the cold front has
 # passed the sensor anyway (many small tappings), so one shower is gone.
 HW_DEPLETED_BELOW_DEFAULT_C = 15.0
+# Showers booked without a recognisable tapping (sensor outage) this close to
+# each other are shown as one "last shower".
+HW_UNTIMED_CLUSTER_MINUTES = 90
 # The tank "covers" a number of showers when it is at most this much short of
 # them — otherwise every tenth of a degree of standby loss would start the
 # pump, which is the v1 behaviour the planner exists to avoid. With 2 per tank
