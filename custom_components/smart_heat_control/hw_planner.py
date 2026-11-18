@@ -104,6 +104,7 @@ from .const import (
     HW_DRAW_START_C_PER_MIN,
     HW_EARLY_STOP_BLOCK_MINUTES,
     HW_EARLY_STOP_GRACE_MINUTES,
+    HW_EXTENDED_MIN_DIFF_ORE,
     HW_EXTENDED_PRICE_SHARE,
     HW_EVENT_HISTORY_DAYS,
     HW_FILL_WINDOW_HOURS,
@@ -116,6 +117,7 @@ from .const import (
     HW_PRODUCTION_MARGIN_MINUTES,
     HW_PRODUCTION_MAX_MINUTES,
     HW_PRODUCTION_MIN_MINUTES,
+    HW_PRICE_TOLERANCE_ORE,
     HW_PRICE_TOLERANCE_SHARE,
     HW_PRICE_TOLERANCE_SPREAD_SHARE,
     HW_PRODUCTION_TIMEOUT_HOURS,
@@ -650,15 +652,17 @@ def cheapest_window(
     prices_today: tuple[float, ...],
     prices_tomorrow: tuple[float, ...],
     earliest: datetime | None = None,
+    price_adder: float = 0.0,
 ) -> Window:
     """Where to run ``minutes`` between now and ``deadline`` (local times).
 
     ``earliest`` (on a quarter) keeps the run from starting before that time.
-    A run counts as cheap enough when its average price is within
-    HW_PRICE_TOLERANCE_SHARE of the cheapest run's (at least
-    HW_PRICE_TOLERANCE_SPREAD_SHARE of the price range in the horizon, so a
-    flat night is all acceptable): a few öre are not worth missing the night
-    for. Without usable prices the plan is to start as late as possible:
+    A run counts as cheap enough when its average price is within the
+    tolerance of the cheapest run's: HW_PRICE_TOLERANCE_SHARE of the total
+    price (spot + ``price_adder``), at least HW_PRICE_TOLERANCE_ORE and at
+    least HW_PRICE_TOLERANCE_SPREAD_SHARE of the price range in the horizon
+    (so a flat night is all acceptable): a few öre are not worth missing the
+    night for. Without usable prices the plan is to start as late as possible:
     least standby loss, and the hours before a morning deadline are usually
     the cheap ones anyway.
     """
@@ -706,7 +710,8 @@ def cheapest_window(
     best_start, best_avg = min(averages_list, key=lambda item: item[1])
     prices = [p for _, p in slots]
     tolerance = max(
-        HW_PRICE_TOLERANCE_SHARE * abs(best_avg),
+        HW_PRICE_TOLERANCE_SHARE * abs(best_avg + price_adder),
+        HW_PRICE_TOLERANCE_ORE,
         HW_PRICE_TOLERANCE_SPREAD_SHARE * (max(prices) - min(prices)),
     )
     ok = tuple(start for start, avg in averages_list if avg <= best_avg + tolerance + _EPS)
@@ -784,6 +789,7 @@ class HwPlanner:
         vacation_hours_left: float | None,
         paused: bool,
         extended_temp: float | None = None,
+        price_adder: float = 0.0,
     ) -> HwPlan:
         """Advance one cycle.
 
@@ -793,7 +799,8 @@ class HwPlanner:
         is neither judged nor ended on what the pump does meanwhile.
 
         ``extended_temp``: what a cheap daily fill may heat to (None = never
-        above default).
+        above default). ``price_adder``: tax and fees on top of spot, for
+        comparing prices as what they cost.
         """
         local = now.astimezone(tz)
         day_start = local.replace(
@@ -934,6 +941,7 @@ class HwPlanner:
             fill_target = self._fill_target(
                 local=local, ready_by=ready_by, tank_temp=tank_temp,
                 default_hw_temp=default_hw_temp, extended_temp=extended_temp,
+                price_adder=price_adder,
                 strained=strained, shower_hours=shower_hours, prices_today=prices_today,
                 prices_tomorrow=prices_tomorrow,
             )
@@ -941,6 +949,7 @@ class HwPlanner:
             fill_window = cheapest_window(
                 local, ready_by, minutes, prices_today, prices_tomorrow,
                 earliest=ready_by - timedelta(hours=HW_FILL_WINDOW_HOURS),
+                price_adder=price_adder,
             )
             fill_past_latest = local >= fill_window.latest_start
             start_fill = fill_window.start <= local or fill_past_latest
@@ -964,6 +973,7 @@ class HwPlanner:
             heat_window = cheapest_window(
                 local, heat_by, minutes, prices_today, prices_tomorrow,
                 earliest=heat_by - timedelta(hours=HW_TOP_UP_WINDOW_HOURS),
+                price_adder=price_adder,
             )
             start_heat = heat_window.start <= local or local >= heat_window.latest_start
             begin = local if start_heat else heat_window.start
@@ -990,8 +1000,15 @@ class HwPlanner:
             if paused:
                 self._judge_from = now
             running = fill_window if self.producing_kind == "fill" else heat_window
-            retry_ok = running is not None and running.ok_after(
-                now.astimezone(tz) + timedelta(minutes=HW_AUX_ABORT_BLOCK_MINUTES)
+            # On a cold night (compressor at maximum for hours) the elpatron
+            # is accepted: the heat the hot water takes from the house has to
+            # come from it later anyway, and now is the cheap window.
+            retry_ok = (
+                not strain_persistent
+                and running is not None
+                and running.ok_after(
+                    now.astimezone(tz) + timedelta(minutes=HW_AUX_ABORT_BLOCK_MINUTES)
+                )
             )
             ended = None if paused else self._judge_production(
                 now=now, tank_temp=tank_temp, pump=pump, aux_on=aux_on,
@@ -1122,13 +1139,15 @@ class HwPlanner:
         tank_temp: float,
         default_hw_temp: float,
         extended_temp: float | None,
+        price_adder: float,
         strained: bool,
         shower_hours: tuple[int, ...] | None,
         prices_today: tuple[float, ...],
         prices_tomorrow: tuple[float, ...],
     ) -> float:
         """Default, or ``extended_temp`` when the fill is cheap enough
-        compared with the hours the water will be used in.
+        compared with the hours the water will be used in (see
+        HW_EXTENDED_PRICE_SHARE).
 
         Not while the compressor is at maximum for the house: the extra
         minutes of hot water would come out of the heating, and the elpatron
@@ -1144,6 +1163,7 @@ class HwPlanner:
         fill = cheapest_window(
             local, ready_by, minutes, prices_today, prices_tomorrow,
             earliest=ready_by - timedelta(hours=HW_FILL_WINDOW_HOURS),
+            price_adder=price_adder,
         )
         fill_avg = fill.average_from(max(local, fill.start))
         # The day the water is for: the one ready_by starts.
@@ -1158,7 +1178,12 @@ class HwPlanner:
         if fill_avg is None or not use:
             return default
         use_avg = sum(use) / len(use)
-        if use_avg > 0 and fill_avg <= HW_EXTENDED_PRICE_SHARE * use_avg:
+        # Compared on the total price (what a kWh costs), plus a minimum
+        # spot difference so the gain is worth having.
+        if (
+            fill_avg + price_adder <= HW_EXTENDED_PRICE_SHARE * (use_avg + price_adder)
+            and use_avg - fill_avg >= HW_EXTENDED_MIN_DIFF_ORE
+        ):
             return extended
         return default
 

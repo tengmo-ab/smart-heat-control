@@ -604,7 +604,7 @@ _PRODUCING_STATES = ("producing", "topping_up", "refilling")
 def hw_priority_active(plan: HwPlan | None, inputs: Inputs, now: datetime) -> bool:
     """Should space heating step back for the running planned production?
 
-    While the RX95 makes hot water the radiators get nothing and the heating
+    While the RX95 makes hot water the heating circuit gets nothing and the
     deficit (degree minutes) grows; with the compressor at maximum before the
     switch that brings in the elpatron within minutes (18 Nov 2026: 06:05
     hot water, 06:08 elpatron 6 kW). Lowering the heating demand for the

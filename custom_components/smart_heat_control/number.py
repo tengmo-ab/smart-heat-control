@@ -19,6 +19,7 @@ from .const import (
     CONF_HW_AUX_GUARD_OUTDOOR_THRESHOLD,
     CONF_HW_SHOWERS_PER_DAY,
     CONF_HW_SHOWERS_PER_TANK,
+    CONF_PRICE_ADDER,
     CONF_LEGIONELLA_DURATION_HOURS,
     CONF_LEGIONELLA_MAX_DAYS,
     CONF_LEGIONELLA_MIN_DAYS,
@@ -27,6 +28,7 @@ from .const import (
     DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C,
     DEFAULT_HW_SHOWERS_PER_DAY,
     DEFAULT_HW_SHOWERS_PER_TANK,
+    DEFAULT_PRICE_ADDER,
     DEFAULT_HW_TEMP,
     DEFAULT_INDOOR_TEMP,
     DEFAULT_LEGIONELLA_DURATION_HOURS,
@@ -111,6 +113,12 @@ _NUMBERS: tuple[NumberDef, ...] = (
         "hw_showers_per_tank", CONF_HW_SHOWERS_PER_TANK,
         "Showers Per Full Tank", DEFAULT_HW_SHOWERS_PER_TANK,
         1.0, 6.0, 0.5, None, "mdi:water-boiler",
+    ),
+    # Tax + grid fee + markup on top of spot, excl. VAT (see const).
+    NumberDef(
+        "price_adder", CONF_PRICE_ADDER,
+        "Price Adder", DEFAULT_PRICE_ADDER,
+        0.0, 300.0, 1.0, "öre/kWh", "mdi:cash-plus",
     ),
 )
 

@@ -53,6 +53,7 @@ from .const import (
     DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C,
     DEFAULT_HW_SHOWERS_PER_DAY,
     DEFAULT_HW_SHOWERS_PER_TANK,
+    DEFAULT_PRICE_ADDER,
     DEFAULT_HW_TEMP,
     DEFAULT_INDOOR_TEMP,
     DEFAULT_LEGIONELLA_DURATION_HOURS,
@@ -318,6 +319,7 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         self.hw_planner_enabled: bool = False
         self.hw_showers_per_day: float = float(DEFAULT_HW_SHOWERS_PER_DAY)
         self.hw_showers_per_tank: float = float(DEFAULT_HW_SHOWERS_PER_TANK)
+        self.price_adder: float = float(DEFAULT_PRICE_ADDER)
 
         self.default_indoor_temp: float = float(
             cfg.get(CONF_DEFAULT_INDOOR_TEMP, DEFAULT_INDOOR_TEMP)
@@ -920,6 +922,7 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
             ),
             paused=hw_plan_paused(inputs, computed),
             extended_temp=HW_EXTENDED_TEMP_C,
+            price_adder=self.price_adder,
         )
         self._hw_plan = plan
         if tracker.dirty:

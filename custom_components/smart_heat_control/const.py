@@ -70,6 +70,7 @@ CONF_HW_AUX_GUARD_OUTDOOR_THRESHOLD = "hw_aux_guard_outdoor_threshold"
 # Same pattern for the hot-water planner numbers.
 CONF_HW_SHOWERS_PER_DAY = "hw_showers_per_day"
 CONF_HW_SHOWERS_PER_TANK = "hw_showers_per_tank"
+CONF_PRICE_ADDER = "price_adder"
 
 # ---------------------------------------------------------------------------
 # Default values (mirror v1's input_number defaults so behaviour ports 1:1)
@@ -84,6 +85,11 @@ DEFAULT_LEGIONELLA_DURATION_HOURS = 2
 DEFAULT_HW_AUX_GUARD_OUTDOOR_THRESHOLD_C = -5  # °C, integer
 DEFAULT_HW_SHOWERS_PER_DAY = 2   # showers the household wants available per day
 DEFAULT_HW_SHOWERS_PER_TANK = 2  # showers one full tank delivers
+# Fixed part of the electricity price on top of spot, öre/kWh excl. VAT:
+# energy tax, grid transfer fee, supplier markup. Ratios of prices only mean
+# something on the total price (17 öre spot is not 1/7 of 120 öre once ~80
+# öre of tax and fees are added to both).
+DEFAULT_PRICE_ADDER = 0
 
 # Passive legionella detection — credit a pasteurization event whenever the
 # hot-water tank reaches LEGIONELLA_PASSIVE_THRESHOLD_C and sustains it for
@@ -441,15 +447,22 @@ HW_TOP_UP_WINDOW_HOURS = 3
 # at the first cheap-enough quarter, which leaves room to wait for a calmer
 # compressor; measured 18 Nov 2026: a night at 81-100 öre was planned for its
 # 84-öre bottom, deferred there, and ended up at 200 öre in the morning.
-HW_PRICE_TOLERANCE_SHARE = 0.15
+HW_PRICE_TOLERANCE_SHARE = 0.15   # of the total price (spot + price adder)
 HW_PRICE_TOLERANCE_SPREAD_SHARE = 0.10
-# Extended fill: when the fill window costs at most this share of the price
-# in the hours the water will be used, the daily fill heats to EXTENDED_TEMP
-# instead of default — the compressor gets there on its own on an RX95
-# (51 -> 55.5 °C, 17 Nov 2026), above ~55 °C the elpatron takes over and
-# heating cheap at COP 1 no longer beats topping up dear at COP ~2.5.
+# ...and never less than this many öre: a production is ~1.5 kWh, so 15 öre
+# is 20-odd öre per fill — not worth missing the night for.
+HW_PRICE_TOLERANCE_ORE = 15.0
+# Extended fill: the daily fill heats to EXTENDED_TEMP instead of default
+# when the extra heat made now is cheaper than making it later. The compressor
+# gets to ~55 °C on its own on an RX95 (51 -> 55.5 °C, 17 Nov 2026) but at a
+# worse COP (~2.0) than an evening top-up at 45-50 °C (~2.5), so on the total
+# price (spot + adder) the fill must cost at most COP ratio 0.8 of the hours
+# the water is used in — and at least MIN_DIFF öre less on spot, so the gain
+# is worth having (1 kWh of heat: 40 öre spot difference is ~0.3 kr). Above
+# ~55 °C the elpatron takes over (COP 1): not worth it, hence not 60 °C.
 HW_EXTENDED_TEMP_C = 55.0
-HW_EXTENDED_PRICE_SHARE = 0.75
+HW_EXTENDED_PRICE_SHARE = 0.8
+HW_EXTENDED_MIN_DIFF_ORE = 40.0
 # Setpoint between productions. The pump's own minimum: it tops up as rarely
 # as possible, and after a shower it only lifts the cold bottom to here.
 HW_RESERVE_TEMP_C = 30.0
@@ -489,7 +502,10 @@ HW_STRAIN_AUX_LOOKBACK_MINUTES = 15
 # start (see HW_PRICE_TOLERANCE_SHARE).
 HW_MAX_DEFER_HOURS = 6
 # Compressor at maximum (defrost stops aside) for this long: it is a cold
-# night, a calmer moment is not coming, so waiting for one is pointless.
+# night, a calmer moment is not coming, so waiting for one is pointless —
+# and so is stopping a production for the elpatron: the heat the hot water
+# takes from the house has to be made up by the elpatron later anyway, and
+# now, in the cheap window, is the better time for it.
 HW_STRAIN_PERSISTENT_HOURS = 2
 # Elpatron seen during a planned production: stop it and try again later, at
 # most this many times per fill — but only when the retry still falls on a
@@ -500,7 +516,7 @@ HW_MAX_AUX_ABORTS = 2
 # While a production runs the space-heating demand is lowered — indoor target
 # under the current indoor temperature, heat curve down — so the pump does
 # not build up a heating deficit (degree minutes) that brings in the
-# elpatron, or cut the hot-water run short to serve the radiators. Bounded by
+# elpatron, or cut the hot-water run short to serve the heating. Bounded by
 # the HW Aux Guard's floors, released when the house gets cold or after
 # PRIORITY_MAX_MINUTES.
 HW_PRIORITY_BELOW_INDOOR_C = 0.5
