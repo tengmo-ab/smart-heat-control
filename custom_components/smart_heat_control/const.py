@@ -389,6 +389,10 @@ HW_PROFILE_MIN_EVENTS = 8
 # (Steeper than plain mixing arithmetic on purpose: a lukewarm tank also loses
 # its tail to the mixing zone, and the household judges by the last minutes.)
 HW_USABLE_MIN_TEMP_C = 40.0
+# Above default only the mixing gain counts (hotter water, less of it in each
+# shower): 4 % per degree, at most 25 % — 55 °C at default 50 is 1.2 tanks.
+HW_ABOVE_DEFAULT_SHARE_PER_C = 0.04
+HW_ABOVE_DEFAULT_MAX_SHARE = 1.25
 # Standby loss of the hot water at the top while the sensor (bottom) no longer
 # shows it, i.e. after a tapping. Measured 0.25-0.4 °C/h at 45-50 °C.
 HW_STANDBY_LOSS_C_PER_HOUR = 0.3
@@ -431,6 +435,21 @@ HW_SHOWER_HOUR_SHARE = 0.08
 # quarter costs: made at lunch it is 2 °C down again by the evening. It goes
 # in the cheapest window within this long before the shower hour.
 HW_TOP_UP_WINDOW_HOURS = 3
+# Price tolerance: a run whose average price is within this share of the
+# cheapest run's counts as cheap enough (at least this share of the price
+# range in the horizon, so a flat night is all acceptable). Production starts
+# at the first cheap-enough quarter, which leaves room to wait for a calmer
+# compressor; measured 18 Nov 2026: a night at 81-100 öre was planned for its
+# 84-öre bottom, deferred there, and ended up at 200 öre in the morning.
+HW_PRICE_TOLERANCE_SHARE = 0.15
+HW_PRICE_TOLERANCE_SPREAD_SHARE = 0.10
+# Extended fill: when the fill window costs at most this share of the price
+# in the hours the water will be used, the daily fill heats to EXTENDED_TEMP
+# instead of default — the compressor gets there on its own on an RX95
+# (51 -> 55.5 °C, 17 Nov 2026), above ~55 °C the elpatron takes over and
+# heating cheap at COP 1 no longer beats topping up dear at COP ~2.5.
+HW_EXTENDED_TEMP_C = 55.0
+HW_EXTENDED_PRICE_SHARE = 0.75
 # Setpoint between productions. The pump's own minimum: it tops up as rarely
 # as possible, and after a shower it only lifts the cold bottom to here.
 HW_RESERVE_TEMP_C = 30.0
@@ -465,13 +484,28 @@ HW_STRAIN_LOAD_PCT = 97.0
 HW_STRAIN_LOOKBACK_MINUTES = 20
 # ...nor within this long after the elpatron itself was on.
 HW_STRAIN_AUX_LOOKBACK_MINUTES = 15
-# But not forever: a wanted production waits at most this long, and never
-# when the tank is empty and a shower is due.
+# But not forever: a wanted production waits at most this long, never when
+# the tank is empty and a shower is due, and never past the last cheap-enough
+# start (see HW_PRICE_TOLERANCE_SHARE).
 HW_MAX_DEFER_HOURS = 6
+# Compressor at maximum (defrost stops aside) for this long: it is a cold
+# night, a calmer moment is not coming, so waiting for one is pointless.
+HW_STRAIN_PERSISTENT_HOURS = 2
 # Elpatron seen during a planned production: stop it and try again later, at
-# most this many times per fill.
+# most this many times per fill — but only when the retry still falls on a
+# cheap-enough quarter; otherwise a few minutes of elpatron are cheaper than
+# pushing the whole production into dearer hours.
 HW_AUX_ABORT_BLOCK_MINUTES = 45
 HW_MAX_AUX_ABORTS = 2
+# While a production runs the space-heating demand is lowered — indoor target
+# under the current indoor temperature, heat curve down — so the pump does
+# not build up a heating deficit (degree minutes) that brings in the
+# elpatron, or cut the hot-water run short to serve the radiators. Bounded by
+# the HW Aux Guard's floors, released when the house gets cold or after
+# PRIORITY_MAX_MINUTES.
+HW_PRIORITY_BELOW_INDOOR_C = 0.5
+HW_PRIORITY_CURVE_STEP = 1.0
+HW_PRIORITY_MAX_MINUTES = 120
 # Away: no showers are planned until this long before the vacation ends.
 HW_VACATION_PREPARE_HOURS = 8
 

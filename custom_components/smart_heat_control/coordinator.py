@@ -62,6 +62,7 @@ from .const import (
     DOMAIN,
     HW_AUX_GUARD_AUX_ON_W,
     HW_AUX_GUARD_EVENT_MIN_INTERVAL_SECONDS,
+    HW_EXTENDED_TEMP_C,
     HW_REDUCTION_HEATING_TIMEOUT_HOURS,
     HW_REDUCTION_NO_HEATING_TIMEOUT_MINUTES,
     HW_REDUCTION_TRIGGER_HOURS,
@@ -77,7 +78,13 @@ from .const import (
     SUMMER_OUTDOOR_MAX_WINDOW_HOURS,
     WRITE_SETTLE_DELAY_SECONDS,
 )
-from .controller import apply_hw_aux_guard, decide, hw_plan_paused
+from .controller import (
+    apply_hw_aux_guard,
+    apply_hw_priority,
+    decide,
+    hw_plan_paused,
+    hw_priority_active,
+)
 from .hw_aux_guard import GuardCaps, HwAuxGuard
 from .hw_planner import Draw, HwPlan, HwPlanner, ShowerTracker
 from .models import ForecastDay, FullDecision, Inputs, Mode, PumpActivity
@@ -374,6 +381,8 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
         self._shower_tracker = ShowerTracker()
         self._hw_planner = HwPlanner()
         self._hw_plan: HwPlan | None = None
+        # True while space heating is lowered for a planned production.
+        self.hw_priority_on: bool = False
         self._hw_store: Store[dict[str, Any]] = Store(
             hass, _HW_STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.hot_water"
         )
@@ -498,6 +507,13 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
                 climate_active=caps.climate,
                 hot_water_active=caps.hot_water,
             )
+
+            # Space heating steps back while the planner makes shower water
+            # (same post-hysteresis placement as the guard above).
+            phase = "hw_priority"
+            self.hw_priority_on = hw_priority_active(hw_plan, inputs, inputs.now)
+            if self.hw_priority_on:
+                decision = apply_hw_priority(decision, inputs)
 
             _LOGGER.debug(
                 "SHC cascade: mode=%s hw_mode=%s degraded=%s "
@@ -903,6 +919,7 @@ class SmartHeatControlCoordinator(DataUpdateCoordinator[FullDecision]):
                 if computed.is_vacation_active else None
             ),
             paused=hw_plan_paused(inputs, computed),
+            extended_temp=HW_EXTENDED_TEMP_C,
         )
         self._hw_plan = plan
         if tracker.dirty:

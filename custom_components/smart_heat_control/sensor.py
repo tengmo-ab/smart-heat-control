@@ -297,6 +297,9 @@ class HotWaterPlannerSensor(
                 "estimated_minutes": plan.estimated_minutes,
                 "price_basis": plan.price_basis,
                 "compressor_strained": plan.strained,
+                # Indoor target and heat curve lowered for the production.
+                "heating_lowered": self.coordinator.hw_priority_on,
+                "planned_target": plan.planned_target,
                 "deferred_since": _iso(plan.deferred_since),
                 "blocked_until": _iso(plan.blocked_until),
                 "producing_since": _iso(plan.producing_since),

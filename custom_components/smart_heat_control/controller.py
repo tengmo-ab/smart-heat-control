@@ -6,14 +6,19 @@ are marked with ``# FIX (v2):``.
 from __future__ import annotations
 
 import dataclasses
+from datetime import datetime, timedelta
 
 from .const import (
     AUX_POWER_CHEAP_HW_WINTER_LIMIT_W,
     COMPRESSOR_LOW_POWER_CHEAP_W,
     HW_AUX_GUARD_HW_FLOOR_C,
     HW_AUX_GUARD_HW_STEP,
+    HW_AUX_GUARD_INDOOR_FLOOR_DELTA_C,
     HW_AUX_GUARD_MAX_REDUCTION,
     HW_AUX_GUARD_STEP,
+    HW_PRIORITY_BELOW_INDOOR_C,
+    HW_PRIORITY_CURVE_STEP,
+    HW_PRIORITY_MAX_MINUTES,
     HW_RESERVE_TEMP_C,
     MAX_CLIMATE_TEMP,
     MAX_HEAT_CURVE,
@@ -586,6 +591,67 @@ def apply_hw_aux_guard(
 
     return dataclasses.replace(
         decision, climate=climate, hot_water=hot_water, trace=tuple(trace)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hot-water priority — space heating steps back while the planner produces
+# ---------------------------------------------------------------------------
+
+_PRODUCING_STATES = ("producing", "topping_up", "refilling")
+
+
+def hw_priority_active(plan: HwPlan | None, inputs: Inputs, now: datetime) -> bool:
+    """Should space heating step back for the running planned production?
+
+    While the RX95 makes hot water the radiators get nothing and the heating
+    deficit (degree minutes) grows; with the compressor at maximum before the
+    switch that brings in the elpatron within minutes (18 Nov 2026: 06:05
+    hot water, 06:08 elpatron 6 kW). Lowering the heating demand for the
+    length of the production keeps that deficit small. Not when the house is
+    already cold (the HW Aux Guard's comfort floor), and not for longer than
+    HW_PRIORITY_MAX_MINUTES.
+    """
+    if plan is None or not plan.active or plan.state not in _PRODUCING_STATES:
+        return False
+    if plan.producing_since is None or now - plan.producing_since > timedelta(
+        minutes=HW_PRIORITY_MAX_MINUTES
+    ):
+        return False
+    indoor = inputs.indoor_temp
+    return indoor is not None and indoor >= (
+        inputs.default_indoor_temp - HW_AUX_GUARD_INDOOR_FLOOR_DELTA_C
+    )
+
+
+def apply_hw_priority(decision: FullDecision, inputs: Inputs) -> FullDecision:
+    """Lower the indoor target under the current indoor temperature and the
+    heat curve one step, for a running planned production.
+
+    Like the HW Aux Guard: applied after the anti-flap layer, recomputed from
+    the cascade every cycle (so it restores the moment the production ends),
+    only ever lowers, and never below default − HW_AUX_GUARD_MAX_REDUCTION.
+    Modes are left alone.
+    """
+    climate = decision.climate
+    if inputs.indoor_temp is None:
+        return decision
+    d_in, d_curve = inputs.default_indoor_temp, inputs.default_heat_curve
+    target_temp = climate.target_temp
+    if target_temp is not None:
+        floor = max(d_in - HW_AUX_GUARD_MAX_REDUCTION, MIN_CLIMATE_TEMP)
+        lowered = max(inputs.indoor_temp - HW_PRIORITY_BELOW_INDOOR_C, floor)
+        target_temp = round(min(target_temp, lowered), 1)
+    target_curve = _guard_target(
+        climate.target_curve, d_curve, HW_PRIORITY_CURVE_STEP,
+        max(d_curve - HW_AUX_GUARD_MAX_REDUCTION, MIN_HEAT_CURVE),
+    )
+    return dataclasses.replace(
+        decision,
+        climate=dataclasses.replace(
+            climate, target_temp=target_temp, target_curve=target_curve
+        ),
+        trace=decision.trace + ("climate:hw_priority",),
     )
 
 

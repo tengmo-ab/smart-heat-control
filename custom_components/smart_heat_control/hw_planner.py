@@ -85,6 +85,8 @@ from datetime import datetime, timedelta, tzinfo
 from typing import Any
 
 from .const import (
+    HW_ABOVE_DEFAULT_MAX_SHARE,
+    HW_ABOVE_DEFAULT_SHARE_PER_C,
     HW_AUX_ABORT_BLOCK_MINUTES,
     HW_AUX_GUARD_AUX_ON_W,
     HW_COMPLETE_BELOW_TARGET_C,
@@ -102,6 +104,7 @@ from .const import (
     HW_DRAW_START_C_PER_MIN,
     HW_EARLY_STOP_BLOCK_MINUTES,
     HW_EARLY_STOP_GRACE_MINUTES,
+    HW_EXTENDED_PRICE_SHARE,
     HW_EVENT_HISTORY_DAYS,
     HW_FILL_WINDOW_HOURS,
     HW_FULL_BELOW_DEFAULT_C,
@@ -113,6 +116,8 @@ from .const import (
     HW_PRODUCTION_MARGIN_MINUTES,
     HW_PRODUCTION_MAX_MINUTES,
     HW_PRODUCTION_MIN_MINUTES,
+    HW_PRICE_TOLERANCE_SHARE,
+    HW_PRICE_TOLERANCE_SPREAD_SHARE,
     HW_PRODUCTION_TIMEOUT_HOURS,
     HW_PROFILE_MIN_EVENTS,
     HW_PV_BOOST_C,
@@ -125,6 +130,7 @@ from .const import (
     HW_SHOWER_HOUR_SHARE,
     HW_STALE_AFTER_HOURS,
     HW_STANDBY_LOSS_C_PER_HOUR,
+    HW_STRAIN_PERSISTENT_HOURS,
     HW_TOP_REACHED_C,
     HW_TOP_UP_WINDOW_HOURS,
     HW_UNTIMED_CLUSTER_MINUTES,
@@ -147,12 +153,19 @@ _HEATED_MIN_RISE_C = 0.3
 def tank_capacity(temp: float, showers_per_tank: float, default_hw_temp: float) -> float:
     """Showers a tank of evenly ``temp`` warm water delivers.
 
-    ``showers_per_tank`` at the default hot-water temperature (hotter water is
-    not credited further), nothing at HW_USABLE_MIN_TEMP_C, linear in between.
+    ``showers_per_tank`` at the default hot-water temperature, nothing at
+    HW_USABLE_MIN_TEMP_C, linear in between. Above default only the mixing
+    gain is credited (hotter water, less of it per shower): a little, capped.
     """
     floor = min(HW_USABLE_MIN_TEMP_C, default_hw_temp - 5.0)
-    share = (temp - floor) / (default_hw_temp - floor)
-    return showers_per_tank * min(1.0, max(0.0, share))
+    if temp > default_hw_temp:
+        share = min(
+            1.0 + HW_ABOVE_DEFAULT_SHARE_PER_C * (temp - default_hw_temp),
+            HW_ABOVE_DEFAULT_MAX_SHARE,
+        )
+    else:
+        share = max(0.0, (temp - floor) / (default_hw_temp - floor))
+    return showers_per_tank * share
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +588,9 @@ class HwPlan:
     # What the planned window is for: "fill" (the daily one), "top_up" or
     # "refill"; None when nothing is planned.
     planned_kind: str | None = None
+    # What the planned production heats the tank to (55 °C for an extended
+    # fill, else default).
+    planned_target: float | None = None
     # "actual" = real quarter prices for the whole horizon, "assumed" = part
     # of tomorrow taken from today's prices, None = no prices (latest start).
     price_basis: str | None = None
@@ -597,6 +613,36 @@ def production_minutes(tank_temp: float, target_temp: float) -> int:
     return int(math.ceil(minutes / 15.0) * 15)
 
 
+@dataclass(frozen=True, slots=True)
+class Window:
+    """Where a production of a given length can go before a deadline.
+
+    ``start`` is the earliest start that is cheap enough — within the price
+    tolerance of the cheapest run — so a production that has to wait (busy
+    compressor, elpatron) still has acceptable quarters left. ``ok_starts``
+    are all such starts, ``best_start`` the cheapest of them.
+    """
+
+    latest_start: datetime
+    start: datetime
+    best_start: datetime
+    ok_starts: tuple[datetime, ...]
+    # Average price of the run from each candidate start (empty without prices).
+    averages: tuple[tuple[datetime, float], ...] = ()
+    basis: str | None = None
+
+    def ok_after(self, when: datetime) -> bool:
+        """Is there a cheap-enough start later than ``when``?"""
+        return any(start > when for start in self.ok_starts)
+
+    def average_from(self, when: datetime) -> float | None:
+        """Average price of the run starting in the quarter of ``when``."""
+        for start, avg in self.averages:
+            if start <= when < start + _QUARTER:
+                return avg
+        return None
+
+
 def cheapest_window(
     now: datetime,
     deadline: datetime,
@@ -604,18 +650,22 @@ def cheapest_window(
     prices_today: tuple[float, ...],
     prices_tomorrow: tuple[float, ...],
     earliest: datetime | None = None,
-) -> tuple[datetime, datetime, str | None]:
-    """Cheapest run of ``minutes`` between now and ``deadline`` (local times).
+) -> Window:
+    """Where to run ``minutes`` between now and ``deadline`` (local times).
 
     ``earliest`` (on a quarter) keeps the run from starting before that time.
-    Returns (latest_start, planned_start, price_basis). Without usable prices
-    the plan is to start as late as possible: least standby loss, and the
-    hours before a morning deadline are usually the cheap ones anyway.
+    A run counts as cheap enough when its average price is within
+    HW_PRICE_TOLERANCE_SHARE of the cheapest run's (at least
+    HW_PRICE_TOLERANCE_SPREAD_SHARE of the price range in the horizon, so a
+    flat night is all acceptable): a few öre are not worth missing the night
+    for. Without usable prices the plan is to start as late as possible:
+    least standby loss, and the hours before a morning deadline are usually
+    the cheap ones anyway.
     """
     quarters = max(1, minutes // 15)
     latest_start = deadline - quarters * _QUARTER
     if len(prices_today) != QUARTERS_PER_DAY:
-        return latest_start, latest_start, None
+        return Window(latest_start, latest_start, latest_start, (latest_start,))
     begin = now if earliest is None or earliest <= now else earliest
 
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -643,15 +693,26 @@ def cheapest_window(
         index += 1
 
     if len(slots) <= quarters:
-        return latest_start, begin, basis
-    best_start, best_cost = 0, math.inf
+        avg = sum(p for _, p in slots) / len(slots) if slots else None
+        first = slots[0][0] if slots else begin
+        averages = ((first, avg),) if avg is not None else ()
+        return Window(latest_start, begin, begin, (begin,), averages, basis)
+    averages_list: list[tuple[datetime, float]] = []
     running = sum(price for _, price in slots[:quarters])
     for first in range(len(slots) - quarters + 1):
         if first:
             running += slots[first + quarters - 1][1] - slots[first - 1][1]
-        if running < best_cost - _EPS:
-            best_start, best_cost = first, running
-    return latest_start, slots[best_start][0], basis
+        averages_list.append((slots[first][0], running / quarters))
+    best_start, best_avg = min(averages_list, key=lambda item: item[1])
+    prices = [p for _, p in slots]
+    tolerance = max(
+        HW_PRICE_TOLERANCE_SHARE * abs(best_avg),
+        HW_PRICE_TOLERANCE_SPREAD_SHARE * (max(prices) - min(prices)),
+    )
+    ok = tuple(start for start, avg in averages_list if avg <= best_avg + tolerance + _EPS)
+    return Window(
+        latest_start, ok[0], best_start, ok, tuple(averages_list), basis
+    )
 
 
 _KIND_STATE = {"fill": "producing", "top_up": "topping_up", "refill": "refilling"}
@@ -684,6 +745,7 @@ class HwPlanner:
         # End of the last pause: the pump is not judged on what it did while
         # someone else held the setpoint.
         self._judge_from: datetime | None = None
+        self._strained_since: datetime | None = None
 
     def reset(self) -> None:
         """Forget any running production (planner switched off)."""
@@ -696,6 +758,7 @@ class HwPlanner:
         self.aux_aborts = 0
         self._hw_seen = None
         self._judge_from = None
+        self._strained_since = None
 
     @property
     def producing(self) -> bool:
@@ -720,6 +783,7 @@ class HwPlanner:
         default_hw_temp: float,
         vacation_hours_left: float | None,
         paused: bool,
+        extended_temp: float | None = None,
     ) -> HwPlan:
         """Advance one cycle.
 
@@ -727,6 +791,9 @@ class HwPlanner:
         cycle (Extra hot water, a legionella boost, Heating Priority after an
         over-long run). The plan is still returned, but a running production
         is neither judged nor ended on what the pump does meanwhile.
+
+        ``extended_temp``: what a cheap daily fill may heat to (None = never
+        above default).
         """
         local = now.astimezone(tz)
         day_start = local.replace(
@@ -842,41 +909,68 @@ class HwPlanner:
             else None
         )
 
+        # A compressor at maximum for hours: a cold night, no calmer moment
+        # is coming, so waiting for one only pushes the production into
+        # dearer hours.
+        if strained:
+            if self._strained_since is None:
+                self._strained_since = now
+        else:
+            self._strained_since = None
+        strain_persistent = self._strained_since is not None and (
+            now - self._strained_since >= timedelta(hours=HW_STRAIN_PERSISTENT_HOURS)
+        )
+
         window: dict[str, Any] = {"fill_needed": fill_needed}
         fill_past_latest = False
         start_fill = False
         start_heat = False
         urgent = low and heat_by is not None
-        if fill_needed or heat_by is not None:
-            minutes = production_minutes(tank_temp, target)
-            window["estimated_minutes"] = minutes
+        # The window of what would start (or runs) now, for "may it wait?"
+        fill_window: Window | None = None
+        heat_window: Window | None = None
+        fill_target = target
         if fill_needed:
-            latest_start, planned_start, basis = cheapest_window(
+            fill_target = self._fill_target(
+                local=local, ready_by=ready_by, tank_temp=tank_temp,
+                default_hw_temp=default_hw_temp, extended_temp=extended_temp,
+                strained=strained, shower_hours=shower_hours, prices_today=prices_today,
+                prices_tomorrow=prices_tomorrow,
+            )
+            minutes = production_minutes(tank_temp, fill_target)
+            fill_window = cheapest_window(
                 local, ready_by, minutes, prices_today, prices_tomorrow,
                 earliest=ready_by - timedelta(hours=HW_FILL_WINDOW_HOURS),
             )
-            fill_past_latest = local >= latest_start
-            start_fill = planned_start <= local or fill_past_latest
-            begin = local if start_fill else planned_start
+            fill_past_latest = local >= fill_window.latest_start
+            start_fill = fill_window.start <= local or fill_past_latest
+            begin = local if start_fill else fill_window.start
             window.update(
-                planned_kind="fill", price_basis=basis, latest_start=latest_start,
+                planned_kind="fill", price_basis=fill_window.basis,
+                latest_start=fill_window.latest_start, estimated_minutes=minutes,
                 planned_start=begin, planned_end=begin + timedelta(minutes=minutes),
+                planned_target=fill_target,
             )
+        if heat_by is not None:
+            minutes = production_minutes(tank_temp, target)
         if urgent:
             start_heat = True
             window.update(
                 planned_kind="refill", price_basis=None, latest_start=None,
+                estimated_minutes=minutes, planned_target=target,
                 planned_start=local, planned_end=local + timedelta(minutes=minutes),
             )
         elif heat_by is not None and not start_fill:
-            latest_start, planned_start, basis = cheapest_window(
+            heat_window = cheapest_window(
                 local, heat_by, minutes, prices_today, prices_tomorrow,
                 earliest=heat_by - timedelta(hours=HW_TOP_UP_WINDOW_HOURS),
             )
-            start_heat = planned_start <= local or local >= latest_start
-            begin = local if start_heat else planned_start
+            start_heat = heat_window.start <= local or local >= heat_window.latest_start
+            begin = local if start_heat else heat_window.start
             window.update(
-                planned_kind="top_up", price_basis=basis, latest_start=latest_start,
+                planned_kind="top_up", price_basis=heat_window.basis,
+                latest_start=heat_window.latest_start, estimated_minutes=minutes,
+                planned_target=target,
                 planned_start=begin, planned_end=begin + timedelta(minutes=minutes),
             )
         # Tank nearly empty and a shower is due (or the daily fill can wait
@@ -895,9 +989,14 @@ class HwPlanner:
         if self.producing:
             if paused:
                 self._judge_from = now
+            running = fill_window if self.producing_kind == "fill" else heat_window
+            retry_ok = running is not None and running.ok_after(
+                now.astimezone(tz) + timedelta(minutes=HW_AUX_ABORT_BLOCK_MINUTES)
+            )
             ended = None if paused else self._judge_production(
                 now=now, tank_temp=tank_temp, pump=pump, aux_on=aux_on,
                 critical=critical, full_c=full_c, wanted=per_day > 0,
+                retry_ok=retry_ok, base_target=target,
             )
             if ended is None:
                 assert self.producing_mode is not None and self.producing_target is not None
@@ -906,6 +1005,7 @@ class HwPlanner:
                     self.producing_kind = "refill"
                     self.producing_mode = HwMode.SHOWER_REFILL
                 kind = self.producing_kind or "fill"
+                window["planned_target"] = self.producing_target
                 return plan(
                     self.producing_mode,
                     self.producing_target,
@@ -936,10 +1036,22 @@ class HwPlanner:
 
         if kind is not None and not paused:
             gate: str | None = None
-            if not critical:
+            # Waiting is only worth it while a cheap-enough start is still
+            # ahead. A top-up in a shower hour has no price window left, and
+            # it is optional (the tank still holds half a shower): it may
+            # wait for a calmer compressor.
+            if kind == "fill":
+                can_wait = fill_window is not None and fill_window.ok_after(local)
+            elif kind == "top_up":
+                can_wait = (heat_by is not None and heat_by <= local) or (
+                    heat_window is not None and heat_window.ok_after(local)
+                )
+            else:
+                can_wait = True
+            if not critical and can_wait:
                 if self.blocked_until is not None:
                     gate = "Waiting after a stopped production"
-                elif strained:
+                elif strained and not strain_persistent:
                     gate = "Waiting: compressor at maximum or elpatron just on"
                 if (
                     gate is not None
@@ -954,19 +1066,21 @@ class HwPlanner:
                     HwMode.SHOWER_RESERVE, HW_RESERVE_TEMP_C, "deferred", gate, **window
                 )
             mode = HwMode.SHOWER_REFILL if kind == "refill" else HwMode.PLANNED_PRODUCTION
+            produce_to = fill_target if kind == "fill" else target
             self.producing_since = now
             self.producing_mode = mode
-            self.producing_target = target
+            self.producing_target = produce_to
             self.producing_kind = kind
+            self.blocked_until = None
             self.deferred_since = None
             self._hw_seen = now if pump == PumpActivity.HOT_WATER else None
             self._judge_from = None
             _LOGGER.info(
-                "SHC hot-water planner: starting %s (taken %.1f of %d today, "
-                "%.1f available, tank %.1f °C)",
-                kind, taken, per_day, available, tank_temp,
+                "SHC hot-water planner: starting %s to %.0f °C (taken %.1f of %d "
+                "today, %.1f available, tank %.1f °C)",
+                kind, produce_to, taken, per_day, available, tank_temp,
             )
-            return plan(mode, target, _KIND_STATE[kind], _KIND_REASON[kind], **window)
+            return plan(mode, produce_to, _KIND_STATE[kind], _KIND_REASON[kind], **window)
         if kind is None:
             self.deferred_since = None
         elif paused:
@@ -1001,6 +1115,54 @@ class HwPlanner:
         return plan(HwMode.SHOWER_RESERVE, HW_RESERVE_TEMP_C, "reserve", reason, **window)
 
     @staticmethod
+    def _fill_target(
+        *,
+        local: datetime,
+        ready_by: datetime,
+        tank_temp: float,
+        default_hw_temp: float,
+        extended_temp: float | None,
+        strained: bool,
+        shower_hours: tuple[int, ...] | None,
+        prices_today: tuple[float, ...],
+        prices_tomorrow: tuple[float, ...],
+    ) -> float:
+        """Default, or ``extended_temp`` when the fill is cheap enough
+        compared with the hours the water will be used in.
+
+        Not while the compressor is at maximum for the house: the extra
+        minutes of hot water would come out of the heating, and the elpatron
+        tends to follow.
+        """
+        default = min(default_hw_temp, MAX_HW_TEMP)
+        if extended_temp is None:
+            return default
+        extended = min(extended_temp, MAX_HW_TEMP)
+        if strained or extended <= default or len(prices_today) != QUARTERS_PER_DAY:
+            return default
+        minutes = production_minutes(tank_temp, extended)
+        fill = cheapest_window(
+            local, ready_by, minutes, prices_today, prices_tomorrow,
+            earliest=ready_by - timedelta(hours=HW_FILL_WINDOW_HOURS),
+        )
+        fill_avg = fill.average_from(max(local, fill.start))
+        # The day the water is for: the one ready_by starts.
+        if ready_by.date() == local.date():
+            day = prices_today
+        elif len(prices_tomorrow) == QUARTERS_PER_DAY:
+            day = prices_tomorrow
+        else:
+            day = prices_today
+        hours = shower_hours or tuple(range(17, 22))
+        use = [day[h * 4 + q] for h in hours for q in range(4)]
+        if fill_avg is None or not use:
+            return default
+        use_avg = sum(use) / len(use)
+        if use_avg > 0 and fill_avg <= HW_EXTENDED_PRICE_SHARE * use_avg:
+            return extended
+        return default
+
+    @staticmethod
     def _next_shower_hour(
         local: datetime, day_start: datetime, shower_hours: tuple[int, ...] | None
     ) -> datetime | None:
@@ -1031,6 +1193,8 @@ class HwPlanner:
         critical: bool,
         full_c: float,
         wanted: bool,
+        retry_ok: bool,
+        base_target: float,
     ) -> str | None:
         """Return why the running production ends this cycle, or None."""
         assert self.producing_since is not None and self.producing_target is not None
@@ -1042,7 +1206,14 @@ class HwPlanner:
             return self._end(now, "cancelled")
         if tank_temp >= self.producing_target - HW_COMPLETE_BELOW_TARGET_C:
             return self._end(now, "completed")
-        if aux_on and in_hw and not critical and self.aux_aborts < HW_MAX_AUX_ABORTS:
+        if aux_on and in_hw and tank_temp >= base_target - HW_COMPLETE_BELOW_TARGET_C:
+            # Extended fill: the part above default is optional, never on
+            # the elpatron.
+            return self._end(now, "completed")
+        if (
+            aux_on and in_hw and not critical and retry_ok
+            and self.aux_aborts < HW_MAX_AUX_ABORTS
+        ):
             self.aux_aborts += 1
             return self._end(
                 now, "stopped: elpatron came on",
